@@ -11,7 +11,7 @@ It proposes:
     - NPT equilibration with weak restraints (500 kJ/mol/nm² on BB, 200 kJ/mol/nm² on SC, 200 kJ/mol/nm² on lipid Z)
     - NPT equilibration with very weak restraints (200 kJ/mol/nm² on BB, 50 kJ/mol/nm² on SC, 40 kJ/mol/nm² on lipid Z)
     - NPT equilibration with restraints only on BB (50 kJ/mol/nm²)
-- Final NPT production run without restraints, using 4 fs integration timestep with HMR.
+- Final NPT production run without restraints, using 4 fs integration timestep with HMR (by default 1.5 a.m.u.).
 
 Usage:
     python bin/launch_MD_Memb_prot.py --crd input.rst7 --top input.prm7 --pdb input.pdb --out output_folder --name output_name_prefix
@@ -22,19 +22,15 @@ import logging
 import os
 import random
 import sys
-import time
 
 import numpy as np
 import openmm
-import pandas as pd
 import pdb_numpy
-from openmm import LangevinMiddleIntegrator, Platform, XmlSerializer, unit
+from openmm import LangevinMiddleIntegrator, Platform, unit
 from openmm import app
-from openmm.app import ForceField, PDBFile, PDBxFile, Simulation
+from openmm.app import Simulation
 
 import SST2.tools as tools
-from SST2.st import ST, run_st
-
 
 # Logging
 logger = logging.getLogger(__name__)
@@ -73,6 +69,14 @@ def parse_args():
         dest="file_name",
         default="MD",
         help="Output file name prefix",
+    )
+    parser.add_argument(
+        "-hmr",
+        action="store",
+        dest="hmr",
+        help="Hydrogen mass repartition, default=1.5 a.m.u.",
+        type=float,
+        default=1.5,
     )
     parser.add_argument(
         "-time",
@@ -121,8 +125,8 @@ def restraints(system, coor, inpcrd, fc_bb, fc_sc, fc_lpos):
     posresPROT.addPerParticleParameter("y0")
     posresPROT.addPerParticleParameter("z0")
 
-    bb_list = coor.select_atoms("backbone and not name H*").num - 1
-    sc_list = coor.select_atoms(" protein and not backbone and noh").num - 1
+    bb_list = coor.get_index_select("backbone and noh")
+    sc_list = coor.get_index_select("protein and not backbone and noh")
 
     # Backbone restraints
     if fc_bb > 0:
@@ -143,7 +147,7 @@ def restraints(system, coor, inpcrd, fc_bb, fc_sc, fc_lpos):
     posresMEMB.addGlobalParameter("k_lpos", fc_lpos)
     posresMEMB.addPerParticleParameter("z0")
 
-    memb_list = coor.select_atoms("resname PC and name O31 and not name H*").num
+    memb_list = coor.get_index_select("resname PA PC PE PS PG PI PP CL and name P*")
 
     for memb_atom in memb_list:
         z0 = inpcrd.positions[memb_atom].value_in_unit(unit.nanometers)[2]
@@ -174,7 +178,7 @@ if __name__ == "__main__":
     ##############################
 
     logger.info("- Define simulation parameters")
-    hmr = 1.5
+    hmr = args.hmr
 
     dt = 4 * unit.femtosecond
     temperature = 300.0 * unit.kelvin
