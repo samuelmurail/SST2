@@ -41,6 +41,16 @@ These features enable SST2 to effectively sample conformational space and provid
 
 This implementation of SST2 utilizes the [OpenMM](https://openmm.org/) molecular dynamics library. The code is written in Python and utilizes OpenMM's custom forces and integrators to achieve the desired functionality.
 
+## Installation
+
+Please refer to the [installation guide](https://sst2.readthedocs.io/en/latest/installation.html) in the documentation for detailed instructions on how to install SST2 and its dependencies.
+
+To install the last SST2 version, you can use pip:
+
+```bash
+pip install git+https://github.com/samuelmurail/SST2.git
+```
+
 ## Contributing
 
 `SST2` is an open-source project and contributions are welcome. If

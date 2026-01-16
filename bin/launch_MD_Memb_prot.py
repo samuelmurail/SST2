@@ -41,31 +41,31 @@ logger.addHandler(logging.StreamHandler(sys.stdout))
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--crd",
+        "-crd",
         dest="crdfile",
         required=True,
         help="Input coordinate file : rst7, xml ...",
     )
     parser.add_argument(
-        "--top",
+        "-top",
         dest="topfile",
         required=True,
         help="Input topology file : parm7, pdb ...",
     )
     parser.add_argument(
-        "--pdb",
+        "-pdb",
         dest="pdbfile",
         required=True,
         help="Input PDB file",
     )
     parser.add_argument(
-        "--out",
+        "-out",
         dest="folder_name",
         default="MD_output",
         help="Output folder name",
     )
     parser.add_argument(
-        "--name",
+        "-name",
         dest="file_name",
         default="MD",
         help="Output file name prefix",

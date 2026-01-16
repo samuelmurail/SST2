@@ -23,6 +23,15 @@ Once you have a copy of the source, switch to the `SST2` directory.
 $ cd SST2
 ```
 
+## Through Pip
+
+
+Althought no pypi package is currently available, you can install `SST2` using pip:
+
+```bash
+pip install git+https://github.com/samuelmurail/SST2.git
+```
+
 ## Through Conda
 
 `SST2` can then be installed using conda:
