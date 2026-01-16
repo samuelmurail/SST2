@@ -1,3 +1,4 @@
 openmm>=7.7.0
 pdb_numpy>=0.0.1
 pandas>=2.1.4
+pdbfixer>=1.8.0
