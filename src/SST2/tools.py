@@ -36,86 +36,80 @@ def get_forcefield(forcefield_name, water_model):
 
     forcefield_name = forcefield_name.lower().strip()
 
-    forcefield_files = []
+    forcefield_specs = {
+        # Available forcefields in openmm, with their corresponding water models
+        "amber14sb": {
+            "base": ["amber14/protein.ff14SB.xml"],
+            "water": {
+                "tip3p": "amber14/tip3p.xml",
+                "tip3pfb": "amber14/tip3pfb.xml",
+                "tip4pew": "amber14/tip4pew.xml",
+                "tip4pfb": "amber14/tip4pfb.xml",
+                "spce": "amber14/spce.xml",
+                "opc": "amber14/opc.xml",
+            },
+        },
+        "amber99sbildn": {
+            "base": ["amber99sbildn.xml"],
+            "water": {
+                "tip3p": "tip3p.xml",
+                "tip3pfb": "tip3pfb.xml",
+                "tip4pew": "tip4pew.xml",
+                "tip4pfb": "tip4pfb.xml",
+                "spce": "spce.xml",
+                "opc": "opc.xml",
+            },
+        },
+        "amber99sbnmr": {
+            "base": ["amber99sbnm.xml"],
+            "water": {
+                "tip3p": "tip3p.xml",
+                "tip3pfb": "tip3pfb.xml",
+                "tip4pew": "tip4pew.xml",
+                "tip4pfb": "tip4pfb.xml",
+                "spce": "spce.xml",
+                "opc": "opc.xml",
+            },
+        },
+        # Available forcefields in openmmforcefields, with their corresponding water models
+        "amber19sb": {
+            "base": ["amber/protein.ff19SB.xml"],
+            "water": {
+                "opc3": "amber/opc3_standard.xml",
+                "opc": "amber/opc_standard.xml",
+                "tip3pfb": "amber/tip3pfb_standard.xml",
+                "tip3p": "amber/tip3p_standard.xml",
+                "tip4pew": "amber/tip4pew_standard.xml",
+                "tip4pfb": "amber/tip4pfb.xml",
+                "spce": "amber/spce_standard.xml",
+            },
+        },
+        "charmm36": {
+            "base": ["charmm36.xml"],
+            "water": {
+                "tip3": "charmm36/water.xml",
+                "spce": "charmm36/spce.xml",
+                "tip3p-pme-b": "charmm36/tip3p-pme-b.xml",
+                "tip3p-pme-f": "charmm36/tip3p-pme-f.xml",
+                "tip4p2005": "charmm36/tip4p2005.xml",
+                "tip4pew": "charmm36/tip4pew.xml",
+                "tip5p": "charmm36/tip5p.xml",
+                "tip5pew": "charmm36/tip5pew.xml",
+            },
+        },
+    }
 
-    if forcefield_name == "amber14sb":
+    try:
+        forcefield_spec = forcefield_specs[forcefield_name]
+        water_file = forcefield_spec["water"][water_model]
+    except KeyError as error:
+        if error.args and error.args[0] == forcefield_name:
+            raise ValueError(f"Forcefield {forcefield_name} not recognized") from None
+        raise ValueError(
+            f"Water Forcefield {water_model} not recognized with {forcefield_name}"
+        ) from None
 
-        forcefield_files.append("amber14/protein.ff14SB.xml")
-
-        if water_model == "tip3p":
-            forcefield_files.append("amber14/tip3p.xml")
-        elif water_model == "tip3pfb":
-            forcefield_files.append("amber14/tip3pfb.xml")
-        elif water_model == "tip4pew":
-            forcefield_files.append("amber14/tip4pew.xml")
-        elif water_model == "tip4pfb":
-            forcefield_files.append("amber14/tip4pfb.xml")
-        elif water_model == "spce":
-            forcefield_files.append("amber14/spce.xml")
-        elif water_model == "opc":
-            forcefield_files.append("amber14/opc.xml")
-        else:
-            raise ValueError(
-                f"Water Forcefield {water_model} not recognized with {forcefield_name}"
-            )
-
-        return app.ForceField(*forcefield_files)
-
-    elif forcefield_name in ["amber99sbildn", "amber99sbnmr"]:
-
-        if forcefield_name == "amber99sbildn":
-            forcefield_files.append("amber99sbildn.xml")
-        if forcefield_name == "amber99sbnmr":
-            forcefield_files.append("amber99sbnm.xml")
-
-        if water_model == "tip3p":
-            forcefield_files.append("tip3p.xml")
-        elif water_model == "tip3pfb":
-            forcefield_files.append("tip3pfb.xml")
-        elif water_model == "tip4pew":
-            forcefield_files.append("tip4pew.xml")
-        elif water_model == "tip4pfb":
-            forcefield_files.append("tip4pfb.xml")
-        elif water_model == "spce":
-            forcefield_files.append("spce.xml")
-        elif water_model == "opc":
-            forcefield_files.append("opc.xml")
-        else:
-            raise ValueError(
-                f"Water Forcefield {water_model} not recognized with {forcefield_name}"
-            )
-
-        return app.ForceField(*forcefield_files)
-
-    elif forcefield_name == "charmm36":
-
-        forcefield_files.append("charmm36.xml")
-
-        if water_model == "tip3":
-            forcefield_files.append("charmm36/water.xml")
-        elif water_model == "spce":
-            forcefield_files.append("charmm36/spce.xml")
-        elif water_model == "tip3p-pme-b":
-            forcefield_files.append("charmm36/tip3p-pme-b.xml")
-        elif water_model == "tip3p-pme-f":
-            forcefield_files.append("charmm36/tip3p-pme-f.xml")
-        elif water_model == "tip4p2005":
-            forcefield_files.append("charmm36/tip4p2005.xml")
-        elif water_model == "tip4pew":
-            forcefield_files.append("charmm36/tip4pew.xml")
-        elif water_model == "tip5p":
-            forcefield_files.append("charmm36/tip5p.xml")
-        elif water_model == "tip5pew":
-            forcefield_files.append("charmm36/tip5pew.xml")
-        else:
-            raise ValueError(
-                f"Water Forcefield {water_model} not recognized with {forcefield_name}"
-            )
-
-        return app.ForceField(*forcefield_files)
-
-    else:
-        raise ValueError(f"Forcefield {forcefield_name} not recognized")
+    return app.ForceField(*forcefield_spec["base"], water_file)
 
 
 def create_linear_peptide(seq, out_pdb, n_term=None, c_term=None):
@@ -305,6 +299,7 @@ def create_water_box(
     ionicStrength=0.15 * unit.molar,
     positiveIon="Na+",
     negativeIon="Cl-",
+    model='tip3p',
     overwrite=False,
 ):
     """Add a water box around a prepared cif file.
@@ -327,6 +322,8 @@ def create_water_box(
         Positive ion, default is Na+
     negativeIon : str
         Negative ion, default is Cl-
+    model : str
+        Water model, default is tip3p
     overwrite : bool
         Overwrite the output file, default is False
     """
@@ -407,6 +404,7 @@ def create_water_box(
         ionicStrength=ionicStrength,
         positiveIon=positiveIon,
         negativeIon=negativeIon,
+        model=model,
     )
 
     # Save

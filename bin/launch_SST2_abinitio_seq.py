@@ -64,6 +64,14 @@ def parser_input():
         default=1.5,
     )
     parser.add_argument(
+        "-vec",
+        action="store",
+        dest="vec",
+        help="Box size of one vector, provide only one value, default=None",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
         "-eq_time_impl",
         action="store",
         dest="eq_time_impl",
@@ -167,12 +175,6 @@ def parser_input():
         help="Exclude Proline omega dihedral scale angles",
     )
     parser.add_argument(
-        "-nonbonded_RF",
-        action="store_true",
-        dest="nonbonded_RF",
-        help="Use Reaction Field to compute the electrostatic part of nonbonded interactions",
-    )
-    parser.add_argument(
         "-ff",
         action="store",
         dest="ff",
@@ -187,12 +189,23 @@ def parser_input():
         default="tip3p",
     )
     parser.add_argument(
-        "-ace", action="store_true", dest="ace", help="Add ACE cap to N-term"
+        "-ace",
+        action="store_true",
+        dest="ace",
+        help="Add ACE cap to N-term"
     )
     parser.add_argument(
-        "-nme", action="store_true", dest="nme", help="Add NME cap to C-term"
+        "-nme",
+        action="store_true",
+        dest="nme",
+        help="Add NME cap to C-term"
     )
-    parser.add_argument("-v", action="store_true", dest="verbose", help="Verbose mode")
+    parser.add_argument(
+        "-v",
+        action="store_true",
+        dest="verbose",
+        help="Verbose mode"
+    )
 
     return parser
 
@@ -264,10 +277,29 @@ if __name__ == "__main__":
     # forcefield = ForceField(*forcefield_files)
     forcefield = tools.get_forcefield(args.ff, args.water_ff)
 
+    if args.water_ff in ["opc3", "tip3pfb", "tip3p", "spce"]:
+        model = "tip3p"
+    elif args.water_ff in ["opc", "tip4pew", "tip4pfb"]:
+        model = 'tip4pew'
+    else:
+        logger.warning(f"Water model {args.water_ff} not recognized, using tip3pfb")
+        model = "tip3p"
+
+
+    if args.vec is not None:
+        logger.info(f"Using box vector {args.vec} nm, pad value will be ignored.")
+        box_size = args.vec
+        pad = None
+    else:
+        box_size = None
+        pad = args.pad
+
     tools.create_water_box(
         f"{OUT_PATH}/{name}_implicit_equi.cif",
         f"{OUT_PATH}/{name}_water.cif",
-        pad=args.pad,
+        pad=pad,
+        vec=box_size,
+        model=model,
         forcefield=forcefield,
         overwrite=False,
     )
@@ -328,26 +360,14 @@ if __name__ == "__main__":
             f"System is not neutral, charge = {tot_charge:.2f}. Please check the input structure."
         )
 
-    if abs(solute_charge) > 0.01 and not args.nonbonded_RF:
+    if abs(solute_charge) > 0.01:
         logger.warning(
             f"Solute is charged, charge = {solute_charge:.2f}."
             f"Checked that your version of openmm is equal or above"
             f"8.3.1, otherwise be aware that the PME method might introduce artifacts in energy calculations.\n"
         )
 
-    if abs(solute_charge) < 0.01 and args.nonbonded_RF:
-        logger.warning(
-            f"Solute is not charged, charge = {solute_charge:.2f}."
-            f"Using PME for nonbonded interactions is recommended.\n"
-            f"Add the -nonbonded_PME flag with charge solute.\n"
-        )
-
-    if not args.nonbonded_RF:
-        logger.info("Using PME for nonbonded interactions")
-        nonbondedMethod = app.PME
-    else:
-        logger.info("Using CutoffPeriodic for nonbonded interactions")
-        nonbondedMethod = app.CutoffPeriodic
+    nonbondedMethod = app.PME
 
     sys_rest2 = REST2(
         system=system,
