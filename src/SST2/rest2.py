@@ -439,24 +439,11 @@ class REST2:
         """
 
         original_cmap_force = self.system_forces["CMAPTorsionForce"]
-
-        # Create the Solvent CMAP
         solvent_cmap_force = openmm.CMAPTorsionForce()
-        solute_cmap_force = openmm.CMAPTorsionForce()
-        # store original cmap map
-        self.cmap_force_map = []
+        solute_cmap_dict = {}
         self.cmap_num_solute_atoms = []
 
-        for i in range(original_cmap_force.getNumMaps()):
-            map_param = original_cmap_force.getMapParameters(i)
-            logger.info(f"Add CMAP Map index {i}")
-            solute_cmap_force.addMap(map_param[0], map_param[1])
-            solvent_cmap_force.addMap(map_param[0], map_param[1])
-            self.cmap_force_map.append([map_param[0], map_param[1]])
-
-
-        # Need to create a CMAP for all atomnumber cases (1 to 8 solute atoms) as the scaling factor is different for each case
-
+        # extract original cmap torsion parameters
         for i in range(original_cmap_force.getNumTorsions()):
             cmap_indexes = original_cmap_force.getTorsionParameters(i)
             solute_in = sum(
@@ -471,15 +458,31 @@ class REST2:
                 solvent_cmap_force.addTorsion(*cmap_indexes)
             elif solute_in > 0:
                 logger.info(f"Add CMap torsion {i:4} in solute, solute atoms in the CMAP: {solute_in}")
-                self.cmap_num_solute_atoms.append(solute_in)
-                solute_cmap_force.addTorsion(*cmap_indexes)
+                if solute_in not in solute_cmap_dict:
+                    solute_cmap_dict[solute_in] = openmm.CMAPTorsionForce()
+                solute_cmap_dict[solute_in].addTorsion(*cmap_indexes)
             else:
                 raise ValueError("CMap not in solute or solvent")
 
+
+        self.cmap_force_map = []
+        for i in range(original_cmap_force.getNumMaps()):
+            map_param = original_cmap_force.getMapParameters(i)
+            logger.info(f"Add CMAP Map index {i}")
+            for solute_cmap_force in solute_cmap_dict.values():
+                solute_cmap_force.addMap(map_param[0], map_param[1])
+            solvent_cmap_force.addMap(map_param[0], map_param[1])
+            self.cmap_force_map.append([map_param[0], map_param[1]])
+
+
+        # Need to create a CMAP for all atomnumber cases (1 to 8 solute atoms) as the scaling factor is different for each case
+
+
         logger.info("- Add new CMAP Forces")
-        self.system.addForce(solute_cmap_force)
+        for solute_cmap_force in solute_cmap_dict.values():
+            self.system.addForce(solute_cmap_force)
         self.system.addForce(solvent_cmap_force)
-        self.solute_cmap_force = solute_cmap_force
+        self.solute_cmap_force_dict = solute_cmap_dict
 
         logger.info("- Delete original Torsion Forces")
 
@@ -1089,19 +1092,32 @@ class REST2:
     def update_cmap(self, scale):
         """Scale system solute cmap by a scale factor."""
 
-        cmap_force = self.solute_cmap_force
-        print(f"Scale CMAP by {scale}, len cmap maps: {len(self.cmap_force_map)}, len num solute atoms: {len(self.cmap_num_solute_atoms)}")
+        for atom_num, solute_cmap_force in self.solute_cmap_force_dict.items():
+            # for i in range(solute_cmap_force.getNumTorsions()):
+            #     cmap_indexes = solute_cmap_force.getTorsionParameters(i)
+            #     scale = scale ** (atom_num / 8)
+            #     # print(f"CMap torsion {i} in solute, cmap indexes: {cmap_indexes}")
+            
+            atom_scale = scale ** (atom_num / 8)
+            print(f"Scale CMAP with {atom_num} solute atoms by {atom_scale}, num torsions: {solute_cmap_force.getNumTorsions()}")
 
-        for i in range(cmap_force.getNumTorsions()):
-            cmap_indexes = cmap_force.getTorsionParameters(i)
-            print(f"CMap torsion {i} in solute, cmap indexes: {cmap_indexes}")
+            for j, map in enumerate(self.cmap_force_map):
+                solute_cmap_force.setMapParameters(j, map[0], map[1] * atom_scale)
 
-        for i, map in enumerate(self.cmap_force_map):
-            atom_num = self.cmap_num_solute_atoms[i]
-            scale = scale ** (atom_num / 8)
-            cmap_force.setMapParameters(i, map[0], map[1] * scale)
+            solute_cmap_force.updateParametersInContext(self.simulation.context)
 
-        cmap_force.updateParametersInContext(self.simulation.context)
+        # cmap_force = self.solute_cmap_force
+        # print(f"Scale CMAP by {scale}, len cmap maps: {len(self.cmap_force_map)}, len num solute atoms: {len(self.cmap_num_solute_atoms)}")
+
+
+
+        # for i, map in enumerate(self.cmap_force_map):
+            
+        #     atom_num = self.cmap_num_solute_atoms[i]
+        #     scale = scale ** (atom_num / 8)
+        #     cmap_force.setMapParameters(i, map[0], map[1] * scale)
+
+        # cmap_force.updateParametersInContext(self.simulation.context)
 
     def update_nonbonded(self, scale):
         """Scale system nonbonded interaction:
