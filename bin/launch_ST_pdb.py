@@ -61,6 +61,14 @@ def parser_input():
         default=1.5,
     )
     parser.add_argument(
+        "-vec",
+        action="store",
+        dest="vec",
+        help="Box size of one vector, provide only one value, default=None",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
         "-eq_time_expl",
         action="store",
         dest="eq_time_expl",
@@ -180,16 +188,35 @@ if __name__ == "__main__":
 
     # forcefield_files = ['amber14/protein.ff14SB.xml', 'amber14/tip3p.xml']
     # forcefield = ForceField(*forcefield_files)
-
     forcefield = tools.get_forcefield(args.ff, args.water_ff)
 
+    if args.water_ff in ["opc3", "tip3pfb", "tip3p", "spce"]:
+        model = "tip3p"
+    elif args.water_ff in ["opc", "tip4pew", "tip4pfb"]:
+        model = 'tip4pew'
+    else:
+        logger.warning(f"Water model {args.water_ff} not recognized, using tip3pfb")
+        model = "tip3p"
+
+
+    if args.vec is not None:
+        logger.info(f"Using box vector {args.vec} nm, pad value will be ignored.")
+        box_size = args.vec
+        pad = None
+    else:
+        box_size = None
+        pad = args.pad
+
     tools.create_water_box(
-        f"{OUT_PATH}/{name}_fixed.cif",
+        f"{OUT_PATH}/{name}_implicit_equi.cif",
         f"{OUT_PATH}/{name}_water.cif",
-        pad=args.pad,
+        pad=pad,
+        vec=box_size,
+        model=model,
         forcefield=forcefield,
         overwrite=False,
     )
+
 
     ###########################
     ### BASIC EQUILIBRATION ###
