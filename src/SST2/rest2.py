@@ -1556,7 +1556,8 @@ if __name__ == "__main__":
 
     # Whole system:
     name = "2HPL"
-    charmm_use = False
+    # charmm_use = False
+    charmm_use = True
 
     if not charmm_use:
         forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
@@ -1688,8 +1689,8 @@ if __name__ == "__main__":
 
     integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
 
-    # nonbondedMethod = app.PME
-    nonbondedMethod = app.CutoffPeriodic
+    nonbondedMethod = app.PME
+    # nonbondedMethod = app.CutoffPeriodic
 
     test = REST2(
         system,
@@ -1812,7 +1813,7 @@ if __name__ == "__main__":
         f"HarmonicBondForce    {forces_rest2[0]['energy']/forces_sys[0]['energy']:.5e}"
     )
     print(
-        f"HarmonicAngleForce   {forces_rest2[3]['energy']/forces_sys[4]['energy']:.5e}"
+        f"HarmonicAngleForce   {forces_rest2[5]['energy']/forces_sys[7]['energy']:.5e}"
     )
     print("Compare scaled energy:")
     torsion_force = (
@@ -1820,12 +1821,12 @@ if __name__ == "__main__":
         + forces_rest2[5]["energy"]
         + forces_rest2[6]["energy"]
     )
-    print(f"PeriodicTorsionForce {torsion_force/forces_sys[2]['energy']:.5e}")
+    print(f"PeriodicTorsionForce {torsion_force/(forces_sys[1]['energy']+forces_sys[2]['energy']):.5e}")
     print(
-        f"NonbondedForce       {forces_rest2[1]['energy']/forces_sys[1]['energy']:.5e}"
+        f"NonbondedForce       {forces_rest2[2]['energy']/forces_sys[4]['energy']:.5e}"
     )
     print(
-        f"Total                {forces_rest2[9]['energy']/forces_sys[6]['energy']:.5e}"
+        f"Total                {forces_rest2[14]['energy']/forces_sys[10]['energy']:.5e}"
     )
 
     print("\nCompare torsion energy rest2 vs. pep:\n")
