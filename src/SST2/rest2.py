@@ -291,14 +291,15 @@ class REST2:
 
         if "CMAPTorsionForce" in self.system_forces:
             self.CMAP_flag = True
-            logger.info("CMAP Founded, probably Charmm36 format")
+            logger.info("CMAP Founded")
             self.separate_cmap_pot()
         if "CustomNonbondedForce" in self.system_forces:
             self.LJ_flag = True
-            logger.info("CustomNonbondedForce Founded, probably Charmm36 format")
+            logger.info("CustomNonbondedForce Founded")
+            # TO DO
         if "CustomBondForce" in self.system_forces:
             self.Bond_flag = True
-            logger.info("CustomBondForce Founded, probably Charmm36 format")
+            logger.info("CustomBondForce Founded")
 
         # Extract solute nonbonded index and values
         self.find_solute_nb_index()
@@ -444,6 +445,7 @@ class REST2:
         solute_cmap_force = openmm.CMAPTorsionForce()
         # store original cmap map
         self.cmap_force_map = []
+        self.cmap_num_solute_atoms = []
 
         for i in range(original_cmap_force.getNumMaps()):
             map_param = original_cmap_force.getMapParameters(i)
@@ -452,9 +454,12 @@ class REST2:
             solvent_cmap_force.addMap(map_param[0], map_param[1])
             self.cmap_force_map.append([map_param[0], map_param[1]])
 
+
+        # Need to create a CMAP for all atomnumber cases (1 to 8 solute atoms) as the scaling factor is different for each case
+
         for i in range(original_cmap_force.getNumTorsions()):
             cmap_indexes = original_cmap_force.getTorsionParameters(i)
-            solute_in = all(
+            solute_in = sum(
                 [cmap_indexes[j + 1] in self.solute_index for j in range(8)]
             )
             solvent_in = all(
@@ -462,10 +467,11 @@ class REST2:
             )
 
             if solvent_in:
-                # logger.info(f"Add CMap torsion {i} in solvent")
+                logger.info(f"Add CMap torsion {i} in solvent")
                 solvent_cmap_force.addTorsion(*cmap_indexes)
-            elif solute_in:
-                logger.info(f"Add CMap torsion {i:4} in solute")
+            elif solute_in > 0:
+                logger.info(f"Add CMap torsion {i:4} in solute, solute atoms in the CMAP: {solute_in}")
+                self.cmap_num_solute_atoms.append(solute_in)
                 solute_cmap_force.addTorsion(*cmap_indexes)
             else:
                 raise ValueError("CMap not in solute or solvent")
@@ -574,9 +580,9 @@ class REST2:
 
             solute_in = (
                 p1 in self.solute_index
-                and p2 in self.solute_index
-                and p3 in self.solute_index
-                and p4 in self.solute_index
+                or p2 in self.solute_index
+                or p3 in self.solute_index
+                or p4 in self.solute_index
             )
 
             solvent_in = (
@@ -597,7 +603,8 @@ class REST2:
                     p1, p2, p3, p4, [periodicity, phase, k]
                 )
                 self.init_torsions_index.append(torsion_index)
-                self.init_torsions_value.append([p1, p2, p3, p4, periodicity, phase, k])
+                solute_num_atom = (p1 in self.solute_index) + (p2 in self.solute_index) + (p3 in self.solute_index) + (p4 in self.solute_index)
+                self.init_torsions_value.append([p1, p2, p3, p4, periodicity, phase, k, solute_num_atom])
                 torsion_index += 1
             elif solute_in:
                 solute_not_scaled_torsion_force.addTorsion(
@@ -715,6 +722,7 @@ class REST2:
             hydrogenMass=hydrogenMass,
             friction=friction,
             dt=dt,
+            ignoreExternalBonds=True,
         )
         self.system_forces_solute = {
             type(force).__name__: force for force in self.system_solute.getForces()
@@ -731,6 +739,7 @@ class REST2:
             rigidWater=rigidWater,
             ewaldErrorTolerance=ewaldErrorTolerance,
             hydrogenMass=hydrogenMass,
+            ignoreExternalBonds=True,
         )
 
         self.system_forces_solvent = {
@@ -1069,7 +1078,8 @@ class REST2:
         torsion_force = self.solute_torsion_force
 
         for i, index in enumerate(self.init_torsions_index):
-            p1, p2, p3, p4, periodicity, phase, k = self.init_torsions_value[i]
+            p1, p2, p3, p4, periodicity, phase, k, solute_num_atom = self.init_torsions_value[i]
+            scale = scale ** (solute_num_atom / 4)
             torsion_force.setTorsionParameters(
                 index, p1, p2, p3, p4, [periodicity, phase, k * scale]
             )
@@ -1080,8 +1090,15 @@ class REST2:
         """Scale system solute cmap by a scale factor."""
 
         cmap_force = self.solute_cmap_force
+        print(f"Scale CMAP by {scale}, len cmap maps: {len(self.cmap_force_map)}, len num solute atoms: {len(self.cmap_num_solute_atoms)}")
+
+        for i in range(cmap_force.getNumTorsions()):
+            cmap_indexes = cmap_force.getTorsionParameters(i)
+            print(f"CMap torsion {i} in solute, cmap indexes: {cmap_indexes}")
 
         for i, map in enumerate(self.cmap_force_map):
+            atom_num = self.cmap_num_solute_atoms[i]
+            scale = scale ** (atom_num / 8)
             cmap_force.setMapParameters(i, map[0], map[1] * scale)
 
         cmap_force.updateParametersInContext(self.simulation.context)
@@ -1556,8 +1573,9 @@ if __name__ == "__main__":
 
     # Whole system:
     name = "2HPL"
-    # charmm_use = False
     charmm_use = True
+    platform_name = "CPU"
+    mixed_solute = True
 
     if not charmm_use:
         forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
@@ -1570,10 +1588,12 @@ if __name__ == "__main__":
 
     # SYSTEM
 
+    selection = "(chain A and resid > 10 and resid < 21)"
     equi_coor = pdb_numpy.Coor(f"src/SST2/tests/inputs/{name}_equi_water.pdb")
-    solute = equi_coor.select_atoms("chain B")
+    solute = equi_coor.select_atoms(selection)
+    solute_indices = equi_coor.get_index_select(selection)
     solute.write(f"tmp_{name}_only_pep.pdb", overwrite=True)
-    solvant = equi_coor.select_atoms("not chain B")
+    solvant = equi_coor.select_atoms(f"not {selection}")
     solvant.write(f"tmp_{name}_no_pep.pdb", overwrite=True)
 
     pdb = app.PDBFile(f"src/SST2/tests/inputs/{name}_equi_water.pdb")
@@ -1587,8 +1607,10 @@ if __name__ == "__main__":
         constraints=app.HBonds,
     )
 
+    print("Setting up simulation...")
+
     simulation = setup_simulation(
-        system, pdb.positions, pdb.topology, integrator, "CUDA"
+        system, pdb.positions, pdb.topology, integrator, platform_name
     )
 
     print("Whole system energy")
@@ -1637,10 +1659,11 @@ if __name__ == "__main__":
         nonbondedMethod=app.PME,
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
+        ignoreExternalBonds=True,
     )
 
     simulation_pep = setup_simulation(
-        system_pep, pdb_pep.positions, pdb_pep.topology, integrator_pep, "CUDA"
+        system_pep, pdb_pep.positions, pdb_pep.topology, integrator_pep, platform_name
     )
 
     print("Peptide forces:")
@@ -1658,6 +1681,7 @@ if __name__ == "__main__":
         nonbondedMethod=app.PME,
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
+        ignoreExternalBonds=True,
     )
 
     simulation_no_pep = setup_simulation(
@@ -1665,7 +1689,7 @@ if __name__ == "__main__":
         pdb_no_pep.positions,
         pdb_no_pep.topology,
         integrator_no_pep,
-        "CUDA",
+        platform_name,
     )
 
     print("No Peptide forces:")
@@ -1678,13 +1702,18 @@ if __name__ == "__main__":
 
     # Get indices of the three sets of atoms.
     all_indices = [int(i.index) for i in pdb.topology.atoms()]
-    solvent_indices = [
-        int(i.index) for i in pdb.topology.atoms() if not (i.residue.chain.id in ["B"])
-    ]
-    solute_indices = [
-        int(i.index) for i in pdb.topology.atoms() if i.residue.chain.id in ["B"]
-    ]
-
+    # solvent_indices = [
+    #     int(i.index) for i in pdb.topology.atoms() if not (i.residue.chain.id in ["B"])
+    # ]
+    # solute_indices = [
+    #     int(i.index) for i in pdb.topology.atoms() if i.residue.chain.id in ["B"]
+    # ]
+    # solute_indices = [
+    #     int(i.index)
+    #     for i in pdb.topology.atoms()
+    #     if i.residue.chain.id == "A" and i.residue.id > "10" and i.residue.id < "21"
+    # ]
+    print(solute_indices)
     print(f" {len(solute_indices)} atom in solute group")
 
     integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
@@ -1699,6 +1728,7 @@ if __name__ == "__main__":
         solute_indices,
         integrator_rest,
         nonbondedMethod=nonbondedMethod,
+        platform_name=platform_name,
     )
 
     print("REST2 forces 300K:")
@@ -1738,13 +1768,14 @@ if __name__ == "__main__":
             f"Total                {forces_rest2[14]['energy']/forces_sys[10]['energy']:.5e}"
         )
 
-        print("\nCompare torsion energy rest2 vs. pep:\n")
-        torsion_force = forces_rest2[9]["energy"] + forces_rest2[10]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_pep[1]['energy']:.5e}")
+        if not mixed_solute:
+            print("\nCompare torsion energy rest2 vs. pep:\n")
+            torsion_force = forces_rest2[9]["energy"] + forces_rest2[10]["energy"]
+            print(f"PeriodicTorsionForce {torsion_force/forces_pep[1]['energy']:.5e}")
 
-        print("\nCompare torsion energy rest2 vs. no pep:\n")
-        torsion_force = forces_rest2[11]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[1]['energy']:.5e}")
+            print("\nCompare torsion energy rest2 vs. no pep:\n")
+            torsion_force = forces_rest2[11]["energy"]
+            print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[1]['energy']:.5e}")
 
     else:
         print(

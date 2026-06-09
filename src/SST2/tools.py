@@ -440,6 +440,7 @@ def create_system_simulation(
     rigidWater=True,
     ewaldErrorTolerance=0.0005,
     hydrogenMass=1.0 * unit.amu,
+    ignoreExternalBonds=False,
 ):
     """Creates a system and simulation object
 
@@ -471,6 +472,8 @@ def create_system_simulation(
         Ewald error tolerance, default is 0.0005
     hydrogenMass : unit.Quantity
         Hydrogen mass, default is 1 amu
+    ignoreExternalBonds : bool
+        Ignore external bonds, default is False
 
     Returns
     -------
@@ -495,6 +498,7 @@ def create_system_simulation(
         rigidWater=rigidWater,
         ewaldErrorTolerance=ewaldErrorTolerance,
         hydrogenMass=hydrogenMass,
+        ignoreExternalBonds=ignoreExternalBonds,
     )
 
     simulation = setup_simulation(
