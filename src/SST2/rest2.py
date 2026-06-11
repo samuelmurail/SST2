@@ -9,6 +9,7 @@ import sys
 import os
 import logging
 import pdb_numpy.format
+import time
 
 import openmm
 from openmm import unit
@@ -286,7 +287,7 @@ class REST2:
         self.scale = 1.0
 
         self.CMAP_flag = False
-        self.LJ_flag = False
+        self.NBFIX_flag = False
         self.CustomTorsion_flag = False
 
         # Charmm36 and Amber19SB forcefields have CMAP potential, so we need to separate it from the solvent if it is the case
@@ -295,6 +296,18 @@ class REST2:
             logger.info("CMAP Founded")
             self.separate_cmap_pot()
         
+        if "CustomNonbondedForce" in self.system_forces:
+            self.NBFIX_flag = True
+            EnergyFunction = self.system_forces["CustomNonbondedForce"].getEnergyFunction()
+            logger.info(f"CustomNonbondedForce Founded, energy function: {EnergyFunction}")
+            self.add_scale_NBFIX()
+        
+        if "CustomBondForce" in self.system_forces:
+            logger.info("CustomBondForce Founded")
+            LennardJones14_force = self.system_forces["CustomBondForce"]
+            self.add_scale_LJ14()
+
+
         # Charmm36 forcefield has a specific dihedral potential for the proline backbone, so we need to separate it from the solvent if it is the case and if the user want to exclude proline omega scaling
         if "CustomTorsionForce" in self.system_forces:
             self.CustomTorsion_flag = True
@@ -305,13 +318,7 @@ class REST2:
             # TO DO
         
         # 
-        if "CustomNonbondedForce" in self.system_forces:
-            self.LJ_flag = True
-            EnergyFunction = self.system_forces["CustomNonbondedForce"].getEnergyFunction()
-            logger.info(f"CustomNonbondedForce Founded, energy function: {EnergyFunction}")
-            self.find_solute_LJ_index()
 
-            # TO DO
         print(self.system_forces)
 
 
@@ -396,7 +403,7 @@ class REST2:
         logger.info("- REST2 object forces:")
         print_forces(self.system, self.simulation)
 
-    def find_solute_LJ_index(self):
+    def add_scale_NBFIX(self):
         """Extract initial solute Lennard-Jones indexes and values (sigma, epsilon).
 
         Parameters
@@ -408,38 +415,50 @@ class REST2:
         None
         """
 
-        nonbonded_force = self.system_forces["CustomNonbondedForce"]
 
-        logger.info("- Extract solute Lennard-Jones parameters")
-        logger.info(f"- getEnergyFunction(): {nonbonded_force.getEnergyFunction()}")
-        logger.info(f"- getNumGlobalParameters(): {nonbonded_force.getNumGlobalParameters()}")
-        for i in range(nonbonded_force.getNumGlobalParameters()):
-            logger.info(f"- Global parameter {i}: {nonbonded_force.getGlobalParameterName(i)} = {nonbonded_force.getGlobalParameterDefaultValue(i)}")
-        logger.info(f"- getNumPerParticleParameters(): {nonbonded_force.getNumPerParticleParameters()}")
-        for i in range(nonbonded_force.getNumPerParticleParameters()):
-            logger.info(f"- getPerParticleParameterName {i}: {nonbonded_force.getPerParticleParameterName(i)}")
-            logger.info(f"- getParticleParameters    {i}: {nonbonded_force.getParticleParameters(i)}")
+        NBFIX_force = self.system_forces["CustomNonbondedForce"]
 
-        logger.info(f"- getTabulatedFunction(): {nonbonded_force.getTabulatedFunction(0)}")
+        if 'acoef' not in NBFIX_force.getEnergyFunction() and 'bcoef' not in NBFIX_force.getEnergyFunction():
+             logger.error("CustomNonbondedForce does not seem to be a NBFIX force, no acoef and bcoef found in the energy function.")
+             return
 
-        logger.info(f"- getNumTabulatedFunctions(): {nonbonded_force.getNumTabulatedFunctions()}")
-        logger.info(f"- getNonbondedMethod(): {nonbonded_force.getNonbondedMethod()}")
-        logger.info(f"- getCutoffDistance(): {nonbonded_force.getCutoffDistance()}")
-        logger.info(f"- getUseSwitchingFunction(): {nonbonded_force.getUseSwitchingFunction()}")
-        logger.info(f"- getSwitchingDistance(): {nonbonded_force.getSwitchingDistance()}")
-        logger.info(f"- getUseLongRangeCorrection(): {nonbonded_force.getUseLongRangeCorrection()}")
-        # Copy particles
 
-        logger.info(f"- Extract solute Lennard-Jones parameters for {nonbonded_force.getNumParticles()} particles")
-        self.init_LJ_param = []
-        for particle_index in range(nonbonded_force.getNumParticles()):
-            params = nonbonded_force.getParticleParameters(particle_index)
-            self.init_LJ_param.append(*params)
-            #print(int(params[0]), end=" ")
-            # break
-            #logger.info(f"Particle {particle_index}: sigma = {params}, epsilon = ")
-        print(np.unique(self.init_LJ_param, axis=0))
+        NBFIX_force.addGlobalParameter('lambda', 1.0)
+            
+        # Add per-particle solute flag
+        NBFIX_force.addPerParticleParameter('is_solute')
         
+        # Update energy expression
+        old_expr = NBFIX_force.getEnergyFunction()
+        new_expr = f"""
+            scale * ({old_expr[:-1]});
+            scale = is_solute1*is_solute2*lambda
+                    + (is_solute1*(1-is_solute2) 
+                    + is_solute2*(1-is_solute1))*sqrt(lambda)
+                    + (1-is_solute1)*(1-is_solute2)*1.0
+        """
+        NBFIX_force.setEnergyFunction(new_expr)
+
+
+        logger.info(f"- Extract solute Lennard-Jones parameters for {NBFIX_force.getNumParticles()} particles")
+        self.init_LJ_param = []
+        for particle_index in range(NBFIX_force.getNumParticles()):
+            params = NBFIX_force.getParticleParameters(particle_index)
+            NBFIX_force.setParticleParameters(particle_index, [params[0], particle_index in self.solute_index])
+            params = NBFIX_force.getParticleParameters(particle_index)
+            # if params[1]:  # If the particle is a solute
+            #     logger.info(f"Particle {particle_index}: sigma = {params}")
+
+        self.NBFIX_force = NBFIX_force
+
+    def add_scale_LJ14(self):
+        
+        
+        
+        LJ14_force = self.system_forces["CustomBondForce"]
+        old_expr = LJ14_force.getEnergyFunction()
+        print(f"Old LJ14 energy function: {old_expr}")
+
     def find_solute_nb_index(self):
         """Extract initial solute nonbonded indexes and values (charge, sigma, epsilon).
         Extract also exclusion indexes and values (chargeprod, sigma, epsilon)
@@ -556,12 +575,12 @@ class REST2:
                 break
 
     def separate_torsion_pot(self, exclude_Pro_omegas=False):
-        """Use in the REST2 case as it avoid to modify
+        """Use in the REST2 case as it avoids to modify
         twice the torsion terms in the rest2 system and
         in the solute system.
 
-        Torsion potential is separate in two groups:
-        - the solute (scaled one)
+        Torsion potential is separated in two groups:
+        - the solute (scaled one), itself split by fraction (gREST k/l scaling)
         - the solvent and not scaled solute torsion.
 
         As improper angles are not supposed to be scaled, here we extract only
@@ -584,57 +603,56 @@ class REST2:
 
         energy_expression = "k*(1+cos(period*theta-phase));"
 
-        # Create the Solvent bond and not scaled solute torsion
+        # Create the Solvent and not-scaled solute torsion
         solvent_torsion_force = openmm.CustomTorsionForce(energy_expression)
         solvent_torsion_force.setName("Torsion_solvent")
         solvent_torsion_force.addPerTorsionParameter("period")
         solvent_torsion_force.addPerTorsionParameter("phase")
         solvent_torsion_force.addPerTorsionParameter("k")
 
-        # Create the Solute bond
-        solute_scaled_torsion_force = openmm.CustomTorsionForce(energy_expression)
-        solute_scaled_torsion_force.setName("Torsion_solute_scaled")
-        solute_scaled_torsion_force.addPerTorsionParameter("period")
-        solute_scaled_torsion_force.addPerTorsionParameter("phase")
-        solute_scaled_torsion_force.addPerTorsionParameter("k")
-
-        # Create the not scaled Solute bond
+        # Create the not scaled solute torsion
         solute_not_scaled_torsion_force = openmm.CustomTorsionForce(energy_expression)
         solute_not_scaled_torsion_force.setName("Torsion_solute_not_scaled")
         solute_not_scaled_torsion_force.addPerTorsionParameter("period")
         solute_not_scaled_torsion_force.addPerTorsionParameter("phase")
         solute_not_scaled_torsion_force.addPerTorsionParameter("k")
 
+        # Create 4 scaled solute torsion forces, one per fraction (gREST k/l)
+        # fraction 1/4, 2/4, 3/4, 4/4
+        scaled_expressions = {
+            frac: f"lambda_{frac}_4 * k*(1+cos(period*theta-phase));"
+            for frac in [1, 2, 3, 4]
+        }
+
+        solute_scaled_torsion_forces = {}
+        for frac in [1, 2, 3, 4]:
+            logger.info(f"- Create scaled solute torsion force for {frac}/4 scaling: {scaled_expressions[frac]}")
+            force = openmm.CustomTorsionForce(scaled_expressions[frac])
+            force.setName(f"Torsion_solute_scaled_{frac}/4")
+            force.addGlobalParameter(f"lambda_{frac}_4", 1.0)
+            force.addPerTorsionParameter("period")
+            force.addPerTorsionParameter("phase")
+            force.addPerTorsionParameter("k")
+            solute_scaled_torsion_forces[frac] = force
+
         original_torsion_force = self.system_forces["PeriodicTorsionForce"]
 
         bond_idxs = [sorted([i.index, j.index]) for i, j in self.topology.bonds()]
 
-        # Identify proline backbone atoms ():
+        # Identify proline backbone atoms
         if exclude_Pro_omegas:
-            # Get bonds C (Any) - N (PRO)
             bond_idxs_pro = []
             for i, j in self.topology.bonds():
                 if i.residue.name == "PRO" and i.name == "N" and j.name == "C":
                     bond_idxs_pro.append(sorted([i.index, j.index]))
                 elif j.residue.name == "PRO" and j.name == "N" and i.name == "C":
                     bond_idxs_pro.append(sorted([i.index, j.index]))
-
             logger.info(f"bond_idxs_pro {bond_idxs_pro}")
-
-        # Store the original torsion parameters
-        torsion_index = 0
-        self.init_torsions_index = []
-        self.init_torsions_value = []
 
         for i in range(original_torsion_force.getNumTorsions()):
             (
-                p1,
-                p2,
-                p3,
-                p4,
-                periodicity,
-                phase,
-                k,
+                p1, p2, p3, p4,
+                periodicity, phase, k,
             ) = original_torsion_force.getTorsionParameters(i)
 
             not_improper = (
@@ -664,14 +682,18 @@ class REST2:
                     not_pro_omega = False
 
             if solute_in and not_improper and not_pro_omega:
-                solute_scaled_torsion_force.addTorsion(
+                # Count how many of the 4 atoms are in the solute (gREST k/l)
+                solute_num_atom = (
+                    (p1 in self.solute_index)
+                    + (p2 in self.solute_index)
+                    + (p3 in self.solute_index)
+                    + (p4 in self.solute_index)
+                )
+                solute_scaled_torsion_forces[solute_num_atom].addTorsion(
                     p1, p2, p3, p4, [periodicity, phase, k]
                 )
-                self.init_torsions_index.append(torsion_index)
-                solute_num_atom = (p1 in self.solute_index) + (p2 in self.solute_index) + (p3 in self.solute_index) + (p4 in self.solute_index)
-                self.init_torsions_value.append([p1, p2, p3, p4, periodicity, phase, k, solute_num_atom])
-                torsion_index += 1
             elif solute_in:
+                # Improper or proline omega — not scaled
                 solute_not_scaled_torsion_force.addTorsion(
                     p1, p2, p3, p4, [periodicity, phase, k]
                 )
@@ -680,17 +702,24 @@ class REST2:
                     p1, p2, p3, p4, [periodicity, phase, k]
                 )
             else:
-                raise ValueError("Torsion not in solute or solvent")
+                raise ValueError(f"Torsion {p1}-{p2}-{p3}-{p4} not in solute or solvent")
 
-        self.solute_torsion_force = solute_scaled_torsion_force
+        # Store reference to scaled forces for update
+        self.solute_scaled_torsion_forces = solute_scaled_torsion_forces
 
-        logger.info("- Add new Torsion Forces")
+        logger.info("- Add new Solvent Torsion Forces")
         self.system.addForce(solvent_torsion_force)
+        logger.info("- Add new Solute not scaled Torsion Forces")
         self.system.addForce(solute_not_scaled_torsion_force)
-        self.system.addForce(solute_scaled_torsion_force)
+        for frac in [1, 2, 3, 4]:
+            if solute_scaled_torsion_forces[frac].getNumTorsions() > 0:
+                logger.info(
+                    f"  Adding Torsion_solute_scaled_{frac}4 "
+                    f"({solute_scaled_torsion_forces[frac].getNumTorsions()} torsions)"
+                )
+                self.system.addForce(solute_scaled_torsion_forces[frac])
 
         logger.info("- Delete original Torsion Forces")
-
         for count, force in enumerate(self.system.getForces()):
             if isinstance(force, openmm.PeriodicTorsionForce):
                 self.system.removeForce(count)
@@ -1137,19 +1166,20 @@ class REST2:
 
             return (forces_solute, forces_solvent, forces_all)
 
-    def update_torsions(self, scale):
-        """Scale system solute torsion by a scale factor."""
+    def update_torsion(self, lam):
+        """Update torsion scaling via global lambda parameters.
+        Each force group uses λ^(frac) precomputed on CPU,
+        sent as a single float per group.
 
-        torsion_force = self.solute_torsion_force
-
-        for i, index in enumerate(self.init_torsions_index):
-            p1, p2, p3, p4, periodicity, phase, k, solute_num_atom = self.init_torsions_value[i]
-            scale_local = scale ** (solute_num_atom / 4)
-            torsion_force.setTorsionParameters(
-                index, p1, p2, p3, p4, [periodicity, phase, k * scale_local]
-            )
-
-        torsion_force.updateParametersInContext(self.simulation.context)
+        Parameters
+        ----------
+        lam : float
+            REST2 scaling parameter (T0/T_solute), between 0 and 1
+        """
+        context = self.simulation.context
+        for frac in [1, 2, 3, 4]:
+            if frac in self.solute_scaled_torsion_forces:
+                context.setParameter(f"lambda_{frac}_4", lam ** (frac / 4.0))
 
     def update_cmap(self, scale):
         """Scale system solute cmap by a scale factor."""
@@ -1171,11 +1201,12 @@ class REST2:
         """
 
         nonbonded_force = self.system_forces["NonbondedForce"]
+        sqrt_scale = np.sqrt(scale)
 
         for i in self.solute_index:
             q, sigma, eps = self.init_nb_param[i]
             nonbonded_force.setParticleParameters(
-                i, q * np.sqrt(scale), sigma, eps * scale
+                i, q * sqrt_scale, sigma, eps * scale
             )
 
         for i in range(len(self.init_nb_exept_index)):
@@ -1193,6 +1224,15 @@ class REST2:
 
         # Need to fix simulation
         nonbonded_force.updateParametersInContext(self.simulation.context)
+
+    def update_NBFIX(self, scale):
+        """Scale system NBFIX interaction:
+        - LJ epsilon by `scale`
+        """
+
+        self.simulation.context.setParameter('lambda', scale)
+        # logger.info(f"Set NBFIX lambda to {scale}, {self.NBFIX_force.getEnergyFunction()}")
+        # self.NBFIX_force.updateParametersInContext(self.simulation.context)
 
     def update_nonbonded_reaction_field(self, scale):
         """Scale system nonbonded interaction:
@@ -1242,6 +1282,7 @@ class REST2:
         """
 
         nonbonded_force = self.system_forces_solute["NonbondedForce"]
+        scale_sqrt = np.sqrt(scale)
 
         # assert len(self.init_nb_param) == nonbonded_force.getNumParticles()
 
@@ -1254,7 +1295,7 @@ class REST2:
             #     print(f"{index}  {q}, {sigma}, {eps}")
             #     print(f"{i}  {q_old}, {sigma_old}, {eps_old}")
             nonbonded_force.setParticleParameters(
-                i, q * np.sqrt(scale), sigma, eps * scale
+                i, q * scale_sqrt, sigma, eps * scale
             )
         # for particle_index in range(4):
         #    [charge, sigma, epsilon] = nonbonded_force.getParticleParameters(
@@ -1303,7 +1344,9 @@ class REST2:
             self.update_bonded_reaction_field(scale)
         else:
             self.update_nonbonded_solute(scale)
-        self.update_torsions(scale)
+        if self.NBFIX_flag:
+            self.update_NBFIX(scale)
+        self.update_torsion(scale)
 
     def compute_all_energies(self):
         """Extract solute potential energy and solute-solvent interactions."""
@@ -1886,7 +1929,56 @@ if __name__ == "__main__":
         print(f"E_solvent            {E_solvent/forces_no_pep[6]['energy']:.5e}")
 
     scale = 0.5
+    t0 = time.time()
     test.scale_nonbonded_torsion(scale)
+    print(f"scale_nonbonded_torsion:     {1000*(time.time()-t0):.4f}ms")
+
+
+    # def scale_nonbonded_torsion(self, scale):
+    #     """Scale solute nonbonded potential and
+    #     solute torsion potential
+    #     """
+
+    #     self.scale = scale
+    #     if self.CMAP_flag:
+    #         self.update_cmap(scale)
+    #     self.update_nonbonded(scale)
+    #     if self.reaction_field:
+    #         self.update_nonbonded_reaction_field(scale)
+    #         self.update_bonded_reaction_field(scale)
+    #     else:
+    #         self.update_nonbonded_solute(scale)
+    #     if self.NBFIX_flag:
+    #         self.update_NBFIX(scale)
+    #     self.update_torsions(scale)
+
+
+    
+    t0 = time.time()
+    test.update_nonbonded(scale)
+    print(f"update_nonbonded:            {1000*(time.time()-t0):.4f}ms")
+
+    t0 = time.time()
+    test.update_torsion(scale)
+    print(f"update_torsion:              {1000*(time.time()-t0):.4f}ms")
+
+    if test.CMAP_flag:
+        t0 = time.time()
+        test.update_cmap(scale)
+        print(f"update_cmap:             {1000*(time.time()-t0):.4f}ms")
+    
+    if not test.reaction_field:
+        t0 = time.time()
+        test.update_nonbonded_solute(scale)
+        print(f"update_nonbonded_solute: {1000*(time.time()-t0):.4f}ms")
+    
+    if test.NBFIX_flag:
+        t0 = time.time()
+        test.update_NBFIX(scale)
+        print(f"update_NBFIX:            {1000*(time.time()-t0):.4f}ms")
+    
+
+
     print("REST2 forces 600K:")
     tools.print_forces(test.system, test.simulation)
     forces_rest2 = tools.get_forces(test.system, test.simulation)
