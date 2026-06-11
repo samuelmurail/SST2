@@ -288,7 +288,7 @@ class REST2:
 
         self.CMAP_flag = False
         self.NBFIX_flag = False
-        self.CustomTorsion_flag = False
+        self.lj14_flag = False
 
         # Charmm36 and Amber19SB forcefields have CMAP potential, so we need to separate it from the solvent if it is the case
         if "CMAPTorsionForce" in self.system_forces:
@@ -296,35 +296,22 @@ class REST2:
             logger.info("CMAP Founded")
             self.separate_cmap_pot()
         
+        # In charmm forcefield, NBFIX is implemented as a CustomNonbondedForce, so we need to separate it from the solvent if it is the case and if the user want to scale NBFIX
         if "CustomNonbondedForce" in self.system_forces:
             self.NBFIX_flag = True
             EnergyFunction = self.system_forces["CustomNonbondedForce"].getEnergyFunction()
             logger.info(f"CustomNonbondedForce Founded, energy function: {EnergyFunction}")
             self.add_scale_NBFIX()
         
+        # In charmm36 forcefield, the Lennard-Jones 1-4 interactions are implemented as a CustomBondForce, so we need to separate it from the solvent if it is the case and if the user want to scale LJ14
         if "CustomBondForce" in self.system_forces:
+            self.lj14_flag = True
             logger.info("CustomBondForce Founded")
-            LennardJones14_force = self.system_forces["CustomBondForce"]
             self.add_scale_LJ14()
 
-
-        # Charmm36 forcefield has a specific dihedral potential for the proline backbone, so we need to separate it from the solvent if it is the case and if the user want to exclude proline omega scaling
+        # Charmm36 forcefield has a specific dihedral potential improper dihedrals
         if "CustomTorsionForce" in self.system_forces:
-            self.CustomTorsion_flag = True
-            logger.info("CustomTorsionForce Founded")
-            EnergyFunction = self.system_forces["CustomTorsionForce"].getEnergyFunction()
-            torsion_num = self.system_forces["CustomTorsionForce"].getNumPerTorsionParameters()
-            logger.info(f"CustomTorsionForce energy function: {EnergyFunction}, number of parameters: {torsion_num}")
-            # TO DO
-        
-        # 
-
-        print(self.system_forces)
-
-
-        # TODO: LennardJones, LennardJones14
-
-
+            logger.info("CustomTorsionForce Founded, not supposed to be scaled, check if it is the case")
 
         # Extract solute nonbonded index and values
         self.find_solute_nb_index()
@@ -452,12 +439,100 @@ class REST2:
         self.NBFIX_force = NBFIX_force
 
     def add_scale_LJ14(self):
+        """Separate CHARMM36 LennardJones14 CustomBondForce into:
+        - solvent (unscaled)
+        - solute boundary (epsilon scaled by sqrt(lambda))
+        - solute-solute (epsilon scaled by lambda)
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None        
+        """
         
         
-        
-        LJ14_force = self.system_forces["CustomBondForce"]
-        old_expr = LJ14_force.getEnergyFunction()
+        # Find the LJ14 CustomBondForce
+        for count, force in enumerate(self.system.getForces()):
+            if isinstance(force, openmm.CustomBondForce):
+                if 'epsilon' in force.getEnergyFunction():
+                    lj14_force = force
+                    lj14_index = count
+                    break
+        old_expr = lj14_force.getEnergyFunction()
         print(f"Old LJ14 energy function: {old_expr}")
+  
+        if 'epsilon' not in lj14_force.getEnergyFunction():
+            logger.error("CustomBondForce does not seem to be a Lennard-Jones 1-4 force, no epsilon found in the energy function.")
+            return
+
+        if lj14_force is None:
+            logger.info("No LennardJones14 CustomBondForce found, skipping.")
+            return
+
+        energy_expression = "4*epsilon*((sigma/r)^12-(sigma/r)^6);"
+
+        # Solvent (unscaled)
+        lj14_solvent = openmm.CustomBondForce(energy_expression)
+        lj14_solvent.setName("LJ14_solvent")
+        lj14_solvent.addPerBondParameter("epsilon")
+        lj14_solvent.addPerBondParameter("sigma")
+
+        # Boundary: 1 solute atom, epsilon scaled by sqrt(lambda)
+        lj14_boundary = openmm.CustomBondForce(
+            "4*lambda_lj14_12*epsilon*((sigma/r)^12-(sigma/r)^6);"
+        )
+        lj14_boundary.setName("LJ14_solute_boundary")
+        lj14_boundary.addGlobalParameter("lambda_lj14_12", 1.0)
+        lj14_boundary.addPerBondParameter("epsilon")
+        lj14_boundary.addPerBondParameter("sigma")
+
+        # Solute-solute: both atoms in solute, epsilon scaled by lambda
+        lj14_solute = openmm.CustomBondForce(
+            "4*lambda_lj14_22*epsilon*((sigma/r)^12-(sigma/r)^6);"
+        )
+        lj14_solute.setName("LJ14_solute_solute")
+        lj14_solute.addGlobalParameter("lambda_lj14_22", 1.0)
+        lj14_solute.addPerBondParameter("epsilon")
+        lj14_solute.addPerBondParameter("sigma")
+
+        # Distribute bonds
+        for i in range(lj14_force.getNumBonds()):
+            p1, p2, (epsilon, sigma) = lj14_force.getBondParameters(i)
+
+            solute_num_atom = (p1 in self.solute_index) + (p2 in self.solute_index)
+
+            if solute_num_atom == 2:
+                lj14_solute.addBond(p1, p2, [epsilon, sigma])
+            elif solute_num_atom == 1:
+                lj14_boundary.addBond(p1, p2, [epsilon, sigma])
+            else:
+                lj14_solvent.addBond(p1, p2, [epsilon, sigma])
+
+        # Store references
+        self.lj14_solvent = lj14_solvent
+        self.lj14_boundary = lj14_boundary
+        self.lj14_solute = lj14_solute
+
+        logger.info("- Add new LJ14 Forces")
+        self.system.addForce(lj14_solvent)
+        if lj14_boundary.getNumBonds() > 0:
+            logger.info(
+                f"  Adding LJ14_solute_boundary "
+                f"({lj14_boundary.getNumBonds()} bonds)"
+            )
+            self.system.addForce(lj14_boundary)
+        if lj14_solute.getNumBonds() > 0:
+            logger.info(
+                f"  Adding LJ14_solute_solute "
+                f"({lj14_solute.getNumBonds()} bonds)"
+            )
+            self.system.addForce(lj14_solute)
+
+        logger.info("- Delete original LJ14 Force")
+        self.system.removeForce(lj14_index)
 
     def find_solute_nb_index(self):
         """Extract initial solute nonbonded indexes and values (charge, sigma, epsilon).
@@ -1234,6 +1309,10 @@ class REST2:
         # logger.info(f"Set NBFIX lambda to {scale}, {self.NBFIX_force.getEnergyFunction()}")
         # self.NBFIX_force.updateParametersInContext(self.simulation.context)
 
+    def update_lj14(self, lam):
+        self.simulation.context.setParameter("lambda_lj14_12", lam ** 0.5)
+        self.simulation.context.setParameter("lambda_lj14_22", lam)
+
     def update_nonbonded_reaction_field(self, scale):
         """Scale system nonbonded interaction:
         - LJ epsilon by `scale`
@@ -1346,6 +1425,8 @@ class REST2:
             self.update_nonbonded_solute(scale)
         if self.NBFIX_flag:
             self.update_NBFIX(scale)
+        if self.lj14_flag:
+            self.update_lj14(scale)
         self.update_torsion(scale)
 
     def compute_all_energies(self):
@@ -1977,7 +2058,10 @@ if __name__ == "__main__":
         test.update_NBFIX(scale)
         print(f"update_NBFIX:            {1000*(time.time()-t0):.4f}ms")
     
-
+    if test.lj14_flag:
+        t0 = time.time()
+        test.update_lj14(scale)
+        print(f"update_lj14:             {1000*(time.time()-t0):.4f}ms")
 
     print("REST2 forces 600K:")
     tools.print_forces(test.system, test.simulation)
