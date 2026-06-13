@@ -4,6 +4,12 @@
 - CMAP has been added
 - Additional terms to scale for charmm36m
 
+- Nonbonded for solute only
+
+Need to fix the compute energy for solute only:
+- NBFIX DONE !
+- LJ14 ?  - > Probably useless has it is already present specifically in whole system
+
 
 # Allow intra molecular solute scaling
 
@@ -21,7 +27,7 @@ Where:
 * l = total number of atoms in the term (2, 3, or 4)
 
 * Done for dihedrals
-
+* Done for CMAP
 
 # Try to solve slow weight convergence
 

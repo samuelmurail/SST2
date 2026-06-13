@@ -301,13 +301,17 @@ class REST2:
             self.NBFIX_flag = True
             EnergyFunction = self.system_forces["CustomNonbondedForce"].getEnergyFunction()
             logger.info(f"CustomNonbondedForce Founded, energy function: {EnergyFunction}")
-            self.add_scale_NBFIX()
+            
+            NBFIX_force = self.system_forces["CustomNonbondedForce"]
+
+            logger.info(f"Add solute flag to CustomNonbondedForce and update energy function to scale NBFIX terms")
+            self.add_scale_NBFIX(NBFIX_force, self.solute_index)
         
         # In charmm36 forcefield, the Lennard-Jones 1-4 interactions are implemented as a CustomBondForce, so we need to separate it from the solvent if it is the case and if the user want to scale LJ14
         if "CustomBondForce" in self.system_forces:
             self.lj14_flag = True
             logger.info("CustomBondForce Founded")
-            self.add_scale_LJ14()
+            self.add_scale_LJ14(self.system, self.solute_index)
 
         # Charmm36 forcefield has a specific dihedral potential improper dihedrals
         if "CustomTorsionForce" in self.system_forces:
@@ -378,6 +382,7 @@ class REST2:
         else:
             raise ValueError("nonbondedMethod not supported")
 
+
         # Extract solute nonbonded index and values from the solute_only system
         self.setup_simulation(
             integrator,
@@ -390,7 +395,7 @@ class REST2:
         logger.info("- REST2 object forces:")
         print_forces(self.system, self.simulation)
 
-    def add_scale_NBFIX(self):
+    def add_scale_NBFIX(self, NBFIX_force, solute_index):
         """Extract initial solute Lennard-Jones indexes and values (sigma, epsilon).
 
         Parameters
@@ -403,12 +408,9 @@ class REST2:
         """
 
 
-        NBFIX_force = self.system_forces["CustomNonbondedForce"]
-
         if 'acoef' not in NBFIX_force.getEnergyFunction() and 'bcoef' not in NBFIX_force.getEnergyFunction():
              logger.error("CustomNonbondedForce does not seem to be a NBFIX force, no acoef and bcoef found in the energy function.")
              return
-
 
         NBFIX_force.addGlobalParameter('lambda', 1.0)
             
@@ -423,22 +425,17 @@ class REST2:
                     + (is_solute1*(1-is_solute2) 
                     + is_solute2*(1-is_solute1))*sqrt(lambda)
                     + (1-is_solute1)*(1-is_solute2)*1.0
-        """
+        """ 
         NBFIX_force.setEnergyFunction(new_expr)
-
 
         logger.info(f"- Extract solute Lennard-Jones parameters for {NBFIX_force.getNumParticles()} particles")
         self.init_LJ_param = []
         for particle_index in range(NBFIX_force.getNumParticles()):
             params = NBFIX_force.getParticleParameters(particle_index)
-            NBFIX_force.setParticleParameters(particle_index, [params[0], particle_index in self.solute_index])
+            NBFIX_force.setParticleParameters(particle_index, [params[0], particle_index in solute_index])
             params = NBFIX_force.getParticleParameters(particle_index)
-            # if params[1]:  # If the particle is a solute
-            #     logger.info(f"Particle {particle_index}: sigma = {params}")
 
-        self.NBFIX_force = NBFIX_force
-
-    def add_scale_LJ14(self):
+    def add_scale_LJ14(self, system, solute_index):
         """Separate CHARMM36 LennardJones14 CustomBondForce into:
         - solvent (unscaled)
         - solute boundary (epsilon scaled by sqrt(lambda))
@@ -446,7 +443,10 @@ class REST2:
 
         Parameters
         ----------
-        None
+        system : System
+            The system to modify
+        solute_index : list
+            The list of the solute index
 
         Returns
         -------
@@ -455,7 +455,7 @@ class REST2:
         
         
         # Find the LJ14 CustomBondForce
-        for count, force in enumerate(self.system.getForces()):
+        for count, force in enumerate(system.getForces()):
             if isinstance(force, openmm.CustomBondForce):
                 if 'epsilon' in force.getEnergyFunction():
                     lj14_force = force
@@ -502,7 +502,7 @@ class REST2:
         for i in range(lj14_force.getNumBonds()):
             p1, p2, (epsilon, sigma) = lj14_force.getBondParameters(i)
 
-            solute_num_atom = (p1 in self.solute_index) + (p2 in self.solute_index)
+            solute_num_atom = (p1 in solute_index) + (p2 in solute_index)
 
             if solute_num_atom == 2:
                 lj14_solute.addBond(p1, p2, [epsilon, sigma])
@@ -517,22 +517,27 @@ class REST2:
         self.lj14_solute = lj14_solute
 
         logger.info("- Add new LJ14 Forces")
-        self.system.addForce(lj14_solvent)
+        if lj14_solvent.getNumBonds() > 0:
+            logger.info(
+                f"  Adding LJ14_solvent"
+                f"({lj14_solvent.getNumBonds()} bonds)"
+            )
+            system.addForce(lj14_solvent)
         if lj14_boundary.getNumBonds() > 0:
             logger.info(
                 f"  Adding LJ14_solute_boundary "
                 f"({lj14_boundary.getNumBonds()} bonds)"
             )
-            self.system.addForce(lj14_boundary)
+            system.addForce(lj14_boundary)
         if lj14_solute.getNumBonds() > 0:
             logger.info(
                 f"  Adding LJ14_solute_solute "
                 f"({lj14_solute.getNumBonds()} bonds)"
             )
-            self.system.addForce(lj14_solute)
+            system.addForce(lj14_solute)
 
         logger.info("- Delete original LJ14 Force")
-        self.system.removeForce(lj14_index)
+        system.removeForce(lj14_index)
 
     def find_solute_nb_index(self):
         """Extract initial solute nonbonded indexes and values (charge, sigma, epsilon).
@@ -783,11 +788,23 @@ class REST2:
         self.solute_scaled_torsion_forces = solute_scaled_torsion_forces
 
         logger.info("- Add new Solvent Torsion Forces")
-        self.system.addForce(solvent_torsion_force)
+        if solvent_torsion_force.getNumTorsions() > 0:
+            logger.info(
+                f"  Adding Torsion_solvent "
+                f"({solvent_torsion_force.getNumTorsions()} torsions)"
+            )
+            self.system.addForce(solvent_torsion_force)
         logger.info("- Add new Solute not scaled Torsion Forces")
-        self.system.addForce(solute_not_scaled_torsion_force)
+        if solute_not_scaled_torsion_force.getNumTorsions() > 0:
+            logger.info(
+                f"  Adding Torsion_solute_not_scaled "
+                f"({solute_not_scaled_torsion_force.getNumTorsions()} torsions)"
+            )
+            self.system.addForce(solute_not_scaled_torsion_force)
+        self.lambda_torsion_frac = []
         for frac in [1, 2, 3, 4]:
             if solute_scaled_torsion_forces[frac].getNumTorsions() > 0:
+                self.lambda_torsion_frac.append(frac)
                 logger.info(
                     f"  Adding Torsion_solute_scaled_{frac}4 "
                     f"({solute_scaled_torsion_forces[frac].getNumTorsions()} torsions)"
@@ -850,17 +867,12 @@ class REST2:
         # It has to be removed from pdb files
         # top_num_atom = self.topology.getNumAtoms()
 
-        # print(self.positions)
-        # print(self.solvent_index)
+
         solvent_top, solvent_pos = get_subset(
             self.topology, self.positions, keep=self.solvent_index, types="atom"
         )
         # print(len(solvent_pos), len([self.positions[i] for i in self.solvent_index]))
         app.PDBFile.writeFile(solvent_top, solvent_pos, solvent_stdout, True)
-        # app.PDBFile.writeFile(
-        #     solvent_top, solvent_pos,
-        #     'tmp_solvent.pdb', True
-        # )
 
         # Need to use the get_subset function because of small molecule issue related
         solute_top, solute_pos = get_subset(
@@ -868,34 +880,68 @@ class REST2:
         )
 
         app.PDBFile.writeFile(solute_top, solute_pos, solute_stdout, True)
-        # app.PDBFile.writeFile(
-        #     solute_top,
-        #     solute_pos,
-        #     'tmp_solute.pdb', True
-        # )
 
         sys.stdout = old_stdout
         # Create system and simulations:
         # I don't understand why I need to pass solute_stdout (a StringIO) to StringIO(solute_stdout.getvalue())
         # It's a dirty fix
-        self.system_solute, self.simulation_solute = create_system_simulation(
-            StringIO(solute_stdout.getvalue()),
-            cif_format=False,
-            forcefield=forcefield,
+        # self.system_solute, self.simulation_solute = create_system_simulation(
+        #     StringIO(solute_stdout.getvalue()),
+        #     cif_format=False,
+        #     forcefield=forcefield,
+        #     nonbondedMethod=nonbondedMethod,
+        #     nonbondedCutoff=nonbondedCutoff,
+        #     constraints=constraints,
+        #     platform_name=platform_name,
+        #     rigidWater=rigidWater,
+        #     ewaldErrorTolerance=ewaldErrorTolerance,
+        #     hydrogenMass=hydrogenMass,
+        #     friction=friction,
+        #     dt=dt,
+        #     ignoreExternalBonds=True,
+        # )
+
+        # In the case of Charmm, forcefield I need to modify the NBIX force in the system
+        # before creating the simulation
+
+        solute_integrator = openmm.LangevinMiddleIntegrator(
+            300 * unit.kelvin,
+            friction,
+            dt
+        )
+
+        pdb_solute = app.PDBFile(StringIO(solute_stdout.getvalue()))
+        print(f"Number of atoms in solute pdb: {pdb_solute.topology}")
+
+        self.system_solute = forcefield.createSystem(
+            pdb_solute.topology,
             nonbondedMethod=nonbondedMethod,
             nonbondedCutoff=nonbondedCutoff,
             constraints=constraints,
-            platform_name=platform_name,
             rigidWater=rigidWater,
             ewaldErrorTolerance=ewaldErrorTolerance,
             hydrogenMass=hydrogenMass,
-            friction=friction,
-            dt=dt,
             ignoreExternalBonds=True,
         )
         self.system_forces_solute = {
             type(force).__name__: force for force in self.system_solute.getForces()
         }
+
+        # In charmm forcefield, NBFIX is implemented as a CustomNonbondedForce, so we need to separate it from the solvent if it is the case and if the user want to scale NBFIX
+        if self.NBFIX_flag:
+            NBFIX_force = self.system_forces_solute["CustomNonbondedForce"]
+            logger.info(f"Add solute flag to CustomNonbondedForce and update energy function to scale NBFIX terms")
+            self.add_scale_NBFIX(NBFIX_force, range(len(self.solute_index)))
+        # This is useless as the value is accessible in the original system
+        # if self.lj14_flag:
+        #     self.add_scale_LJ14(self.system_solute, range(len(self.solute_index)))
+
+        self.simulation_solute = setup_simulation(
+            self.system_solute, pdb_solute.positions, pdb_solute.topology, solute_integrator, platform_name
+        )
+
+
+
 
         self.system_solvent, self.simulation_solvent = create_system_simulation(
             StringIO(solvent_stdout.getvalue()),
@@ -1194,12 +1240,6 @@ class REST2:
             getForces=False,
             getParameters=False,)
 
-        # volume = sim_state.getPeriodicBoxVolume()
-
-        # pme_correct = - np.pi * (self.solute_charge * self.scale) ** 2 / (2 * self.alpha_ewald ** 2 * volume)
-
-        # print(f"Volume: {volume}, pme_correct: {pme_correct.value_in_unit(unit.kilojoules_per_mole)} kJ/mol")
-
         tot_positions = sim_state.getPositions(asNumpy=True)
         box_vector = sim_state.getPeriodicBoxVectors()
 
@@ -1209,35 +1249,17 @@ class REST2:
             forces_rf = get_forces(self.system_rf, self.simulation_rf)
             forces_all = get_forces(self.system, self.simulation)
 
-            # print("Reaction Field Forces")
-            # print_forces(self.system_rf, self.simulation_rf)
-            # print("All Forces")
-            # print_forces(self.system, self.simulation)
-            # print('Solute forces')
-            # print_forces(self.system_solute, self.simulation_solute)
-
             return (None, forces_rf, forces_all)
         
         else:
 
             self.simulation_solute.context.setPeriodicBoxVectors(*box_vector)
             self.simulation_solute.context.setPositions(tot_positions[self.solute_index])
-
             forces_solute = get_forces(self.system_solute, self.simulation_solute)
-
             self.simulation_solvent.context.setPeriodicBoxVectors(*box_vector)
             self.simulation_solvent.context.setPositions(tot_positions[self.solvent_index])
-
             forces_solvent = get_forces(self.system_solvent, self.simulation_solvent)
-
             forces_all = get_forces(self.system, self.simulation)
-
-            # print("Solute Forces")
-            # print_forces(self.system_solute, self.simulation_solute)
-            # print("Solvent Forces")
-            # print_forces(self.system_solvent, self.simulation_solvent)
-            # print("All Forces")
-            # print_forces(self.system, self.simulation)
 
             return (forces_solute, forces_solvent, forces_all)
 
@@ -1252,7 +1274,7 @@ class REST2:
             REST2 scaling parameter (T0/T_solute), between 0 and 1
         """
         context = self.simulation.context
-        for frac in [1, 2, 3, 4]:
+        for frac in self.lambda_torsion_frac:
             if frac in self.solute_scaled_torsion_forces:
                 context.setParameter(f"lambda_{frac}_4", lam ** (frac / 4.0))
 
@@ -1287,16 +1309,9 @@ class REST2:
         for i in range(len(self.init_nb_exept_index)):
             index = self.init_nb_exept_index[i]
             p1, p2, q, sigma, eps = self.init_nb_exept_value[i]
-            # In ExceptionParameters, q is the charge product.
-            # To scale particle charges by `np.sqrt(scale)`
-            # is equivalent to scale the product by `scale`
-            # As for eps, eps(i,j) = sqrt(eps(i)*eps(j))
-            # if we scale eps(i) and eps(j) by `scale`
-            # we aslo scale eps(i,j) by `scale`.
             nonbonded_force.setExceptionParameters(
                 index, p1, p2, q * scale, sigma, eps * scale
             )
-
         # Need to fix simulation
         nonbonded_force.updateParametersInContext(self.simulation.context)
 
@@ -1304,14 +1319,14 @@ class REST2:
         """Scale system NBFIX interaction:
         - LJ epsilon by `scale`
         """
-
         self.simulation.context.setParameter('lambda', scale)
-        # logger.info(f"Set NBFIX lambda to {scale}, {self.NBFIX_force.getEnergyFunction()}")
-        # self.NBFIX_force.updateParametersInContext(self.simulation.context)
+        self.simulation_solute.context.setParameter('lambda', scale)
 
-    def update_lj14(self, lam):
-        self.simulation.context.setParameter("lambda_lj14_12", lam ** 0.5)
-        self.simulation.context.setParameter("lambda_lj14_22", lam)
+    def update_lj14(self, scale):
+        """Scale system 1-4 LJ interaction:"""
+        self.simulation.context.setParameter("lambda_lj14_12", scale ** 0.5)
+        self.simulation.context.setParameter("lambda_lj14_22", scale)
+        # self.simulation_solute.context.setParameter("lambda_lj14_22", scale)
 
     def update_nonbonded_reaction_field(self, scale):
         """Scale system nonbonded interaction:
@@ -1365,48 +1380,18 @@ class REST2:
 
         # assert len(self.init_nb_param) == nonbonded_force.getNumParticles()
 
-        # for i in range(nonbonded_force.getNumParticles()):
         for i, index in enumerate(self.solute_index):
             q, sigma, eps = self.init_nb_param[index]
-            # To check we are looking at the right particles
-            # q_old, sigma_old, eps_old = nonbonded_force.getParticleParameters(i)
-            # if i < 4:
-            #     print(f"{index}  {q}, {sigma}, {eps}")
-            #     print(f"{i}  {q_old}, {sigma_old}, {eps_old}")
             nonbonded_force.setParticleParameters(
                 i, q * scale_sqrt, sigma, eps * scale
             )
-        # for particle_index in range(4):
-        #    [charge, sigma, epsilon] = nonbonded_force.getParticleParameters(
-        #        particle_index
-        #    )
-        #    print(f"{particle_index}  {charge}, {sigma}, {epsilon}")
 
         for i in range(nonbonded_force.getNumExceptions()):
             p1, p2, q, sigma, eps = self.init_nb_exept_solute_value[i]
-            # if i in [11, 12, 13, 14, 15, 16]:
-            #    print(i, p1, p2, q, sigma, eps)
-            # In ExceptionParameters, q is the charge product.
-            # To scale particle charges by `np.sqrt(scale)`
-            # is equivalent to scale the product by `scale`
-            # As for eps, eps(i,j) = sqrt(eps(i)*eps(j))
-            # if we scale eps(i) and eps(j) by `scale`
-            # we aslo scale eps(i,j) by `scale`.
             nonbonded_force.setExceptionParameters(
                 i, p1, p2, q * scale, sigma, eps * scale
             )
 
-        # for exception_index in [11, 12, 13, 14, 15, 16]:
-        #    [
-        #        iatom,
-        #        jatom,
-        #        chargeprod,
-        #        sigma,
-        #        epsilon,
-        #    ] = nonbonded_force.getExceptionParameters(exception_index)
-        #    print(exception_index, iatom, jatom, chargeprod, sigma, epsilon)
-
-        # Need to fix simulation
         nonbonded_force.updateParametersInContext(self.simulation_solute.context)
 
     def scale_nonbonded_torsion(self, scale):
@@ -1430,13 +1415,25 @@ class REST2:
         self.update_torsion(scale)
 
     def compute_all_energies(self):
-        """Extract solute potential energy and solute-solvent interactions."""
+        """Extract solute potential energy and solute-solvent interactions.
+        
+        Unscales each force contribution by the correct factor:
+        - Scaled solute NB (NonbondedForce, LennardJones): divide by scale
+        - Fractional full-system terms (LJ14, torsions, CMAP): divide by scale^(k/l)
+        - Solute-solvent nonbonded: divide by scale^0.5
+        - All other solute terms: no correction
 
-
-        # print("System Forces:")
-        # print_forces(self.system, self.simulation)
-        # print("System RF Forces:")
-        # print_forces(self.system_rf, self.simulation_rf)
+        Returns
+        -------
+        E_solute_scaled : unit.Quantity
+            Unscaled solute-solute scaled energy (NB + LJ14 + torsions + CMAP)
+        E_solute_not_scaled : unit.Quantity
+            Solute energy terms not scaled in REST2 (bonds, angles, torsions, CMAP)
+        E_solvent : unit.Quantity
+            Solvent energy
+        E_solute_solvent_nb : unit.Quantity
+            Unscaled solute-solvent nonbonded energy
+        """
 
         if self.reaction_field:
 
@@ -1491,72 +1488,171 @@ class REST2:
         solute_force, solvent_force, system_force = (
             self.compute_solute_solvent_system_energy()
         )
+
+        # ------------------------------------------------------------------ #
+        # Helper: unscale factor for a given fraction of solute atoms         #
+        # scale = lambda = T0/T, so scaled_energy = scale^frac * true_energy  #
+        # true_energy = scaled_energy / scale^frac                            #
+        # ------------------------------------------------------------------ #
+        def unscale(energy, frac=1.0):
+            return energy / (self.scale ** frac)
+
+        # ------------------------------------------------------------------ #
+        # 1. Solute system                                                    #
+        # ------------------------------------------------------------------ #
+
+        # Scaled at full lambda in solute system
+        SOLUTE_NB_SCALED = {
+            "NonbondedForce",
+            # "LennardJones",       # CHARMM NBFIX, useless, it should cancel
+        }
+        # Not scaled — only needed for solute_nb subtraction
+        SOLUTE_NB_RAW = {
+            "LennardJones14",     # CHARMM LJ14 — detail handled in full system
+        }
+        # Not scaled — direct energy terms
+        SOLUTE_NOT_SCALED = {
+            "HarmonicBondForce",
+            "HarmonicAngleForce",
+            "CustomTorsionForce",   # CHARMM impropers
+        }
+
+        NOT_USED = {
+            "PeriodicTorsionForce", # founded in the full system
+            "CMAPTorsionForce",     # founded in the full system
+            "CMMotionRemover",
+            "Total",
+        }
+
+        E_solute_raw     = 0 * unit.kilojoules_per_mole
+        E_solute_scaled     = 0 * unit.kilojoules_per_mole
         E_solute_not_scaled = 0 * unit.kilojoules_per_mole
-        E_solute_scaled = 0 * unit.kilojoules_per_mole
-        solute_not_scaled_term = ["HarmonicBondForce", "HarmonicAngleForce"]
+        solute_nb           = 0 * unit.kilojoules_per_mole
 
-        for i, force in solute_force.items():
-            if force["name"] == "NonbondedForce":
-                solute_nb = force["energy"]
-                E_solute_scaled += force["energy"]
-            elif force["name"] in solute_not_scaled_term:
-                E_solute_not_scaled += force["energy"]
+        for force in solute_force.values():
+            name   = force["name"]
+            energy = force["energy"]
 
-        solvent_term = [
+            if name in SOLUTE_NB_SCALED:
+                solute_nb       += energy
+                E_solute_scaled += unscale(energy, frac=1.0)
+                E_solute_raw    += energy
+            elif name in SOLUTE_NB_RAW:
+                solute_nb += energy          # subtraction only, no unscaling
+            elif name in SOLUTE_NOT_SCALED:
+                E_solute_not_scaled += energy
+            elif name in NOT_USED:
+                pass
+            else:
+                logger.warning(
+                    f"compute_all_energies: unhandled solute force '{name}'"
+                )
+
+        # ------------------------------------------------------------------ #
+        # 2. Solvent system                                                   #
+        # ------------------------------------------------------------------ #
+
+        SOLVENT_TERMS = {
             "HarmonicBondForce",
             "HarmonicAngleForce",
             "NonbondedForce",
             "PeriodicTorsionForce",
-        ]
-        E_solvent = 0 * unit.kilojoules_per_mole
-        for i, force in solvent_force.items():
-            if force["name"] == "NonbondedForce":
-                solvent_nb = force["energy"]
-            if force["name"] in solvent_term:
-                E_solvent += force["energy"]
+        }
+        SOLVENT_NB = {"NonbondedForce"}
 
-        # system_force = get_forces(self.system, self.simulation)
+        E_solvent  = 0 * unit.kilojoules_per_mole
+        solvent_nb = 0 * unit.kilojoules_per_mole
 
-        solute_torsion_scaled_flag = True
-        solute_torsion_not_scaled_flag = False
-        system_term = [
+        for force in solvent_force.values():
+            name   = force["name"]
+            energy = force["energy"]
+
+            if name in SOLVENT_NB:
+                solvent_nb += energy
+            if name in SOLVENT_TERMS:
+                E_solvent += energy
+            elif name in {"CMMotionRemover"}:
+                pass
+
+        # ------------------------------------------------------------------ #
+        # 3. Full system                                                      #
+        # ------------------------------------------------------------------ #
+
+        TORSION_SCALED_PREFIX = "Torsion_solute_scaled_"
+        CMAP_SOLUTE_PREFIX    = "CMAP_solute_"
+
+        SYSTEM_SCALED_FULL = {
+            "LJ14_solute_solute",
+        }
+        SYSTEM_SCALED_BOUNDARY = {
+            "LJ14_solute_boundary",
+        }
+        SYSTEM_NB = {
+            "NonbondedForce",
+            # "LennardJones",      # CHARMM NBFIX, useless, it should canceled
+        }
+        SYSTEM_IGNORED = {
+            "CMMotionRemover",
+            "MonteCarloBarostat",
             "HarmonicBondForce",
             "HarmonicAngleForce",
-            "PeriodicTorsionForce",
             "CustomTorsionForce",
-        ]
+            "HarmonicBondForce",
+            "Torsion_solvent",
+            "Torsion_solute_not_scaled",
+            "CMAP_solvent",
+            "LJ14_solvent",
+            "Total",
+        }
 
-        for i, force in system_force.items():
-            if force["name"] == "NonbondedForce":
-                all_nb = force["energy"]
-            # Torsion flag to get first component of dihedral
-            # forces (the solute one)
-            elif force["name"] == "CustomTorsionForce" and solute_torsion_scaled_flag:
-                E_solute_scaled += force["energy"]
-                solute_torsion_scaled_flag = False
-                solute_torsion_not_scaled_flag = True
-            elif (
-                force["name"] == "CustomTorsionForce" and solute_torsion_not_scaled_flag
-            ):
-                E_solute_not_scaled += force["energy"]
-                solute_torsion_not_scaled_flag = False
-            # else:
-            #     print(force["name"], " is not treated")
+        all_nb = 0 * unit.kilojoules_per_mole
 
-        # Non scaled solvent-solute_non bonded:
-        solvent_solute_nb = all_nb - solute_nb - solvent_nb
-        # Scaled non bonded
-        # solvent_solute_nb *= (1 / self.scale)**0.5
-        # solute_nb *= 1 / self.scale
+        for force in system_force.values():
+            name   = force["name"]
+            energy = force["energy"]
 
-        # print(f"E_solute_scaled: {E_solute_scaled}")
-        # print(f"solvent_solute_nb: {solvent_solute_nb}")
+            if name in SYSTEM_NB:
+                all_nb += energy
+
+            elif name in SYSTEM_SCALED_FULL:
+                E_solute_scaled += unscale(energy, frac=1.0)
+                E_solute_raw    += energy
+
+            elif name in SYSTEM_SCALED_BOUNDARY:
+                E_solute_scaled += unscale(energy, frac=0.5)
+                E_solute_raw    += energy
+
+            elif name.startswith(TORSION_SCALED_PREFIX):
+                # Parse "Torsion_solute_scaled_3/4" → frac = 0.75
+                num, den = name[len(TORSION_SCALED_PREFIX):].split("/")
+                E_solute_scaled += unscale(energy, frac=int(num) / int(den))
+                E_solute_raw    += energy
+
+            elif name.startswith(CMAP_SOLUTE_PREFIX):
+                # Parse "CMAP_solute_7/8" → frac = 0.875
+                num, den = name[len(CMAP_SOLUTE_PREFIX):].split("/")
+                E_solute_scaled += unscale(energy, frac=int(num) / int(den))
+                E_solute_raw    += energy
+
+            elif name in SYSTEM_IGNORED:
+                pass
+
+            else:
+                logger.warning(
+                    f"compute_all_energies: unhandled system force '{name}'"
+                )
+        # ------------------------------------------------------------------ #
+        # 4. Solute-solvent nonbonded (by subtraction)                       #
+        # ------------------------------------------------------------------ #
+
+        solute_solvent_nb   = all_nb - solute_nb - solvent_nb
+        E_solute_solvent_nb = unscale(solute_solvent_nb, frac=0.5)
 
         return (
-            (1 / self.scale) * E_solute_scaled,
+            E_solute_scaled,
             E_solute_not_scaled,
             E_solvent,
-            (1 / self.scale) ** 0.5 * solvent_solute_nb,
+            E_solute_solvent_nb,
         )
 
     def get_customPotEnergie(self):
@@ -1757,7 +1853,7 @@ if __name__ == "__main__":
 
     # Whole system:
     name = "2HPL"
-    charmm_use = True
+    charmm_use = False
     platform_name = "OpenCL"
 
     if not charmm_use:
@@ -1771,12 +1867,13 @@ if __name__ == "__main__":
 
     # SYSTEM 
 
-    selection = "(chain A and resid > 10 and resid < 21)"
+    #selection = "(chain A and resid > 10 and resid < 21)"
+    selection = "chain B"
     equi_coor = pdb_numpy.Coor(f"src/SST2/tests/inputs/{name}_equi_water.pdb")
     solute = equi_coor.select_atoms(selection)
     solute_indices = equi_coor.get_index_select(selection)
     solute.write(f"tmp_{name}_only_pep.pdb", overwrite=True)
-    solvant = equi_coor.select_atoms(f"not {selection}")
+    solvant = equi_coor.select_atoms(f"not ({selection})")
     solvant.write(f"tmp_{name}_no_pep.pdb", overwrite=True)
 
     logger.info(f"Selected {len(solute_indices)} atoms in solute group")
@@ -1928,10 +2025,16 @@ if __name__ == "__main__":
         E_solvent,
         solvent_solute_nb,
     ) = test.compute_all_energies()
+
     print(f"E_solute_scaled      {E_solute_scaled}")
     print(f"E_solute_not_scaled  {E_solute_not_scaled}")
     print(f"E_solvent            {E_solvent}")
     print(f"solvent_solute_nb    {solvent_solute_nb}")
+
+
+    print("#########################\nREST2 solute forces:")
+    tools.print_forces(test.system_solute, test.simulation_solute)
+    print("#########################")
 
     print("\nCompare not scaled energy rest2 vs. classic:\n")
     print(
@@ -2065,6 +2168,12 @@ if __name__ == "__main__":
 
     print("REST2 forces 600K:")
     tools.print_forces(test.system, test.simulation)
+
+    print("#########################\nREST2 solute forces:")
+    tools.print_forces(test.system_solute, test.simulation_solute)
+    print("#########################")
+
+
     forces_rest2 = tools.get_forces(test.system, test.simulation)
     (
         E_solute_scaled,
@@ -2072,6 +2181,7 @@ if __name__ == "__main__":
         E_solvent,
         solvent_solute_nb,
     ) = test.compute_all_energies()
+
     print(f"E_solute_scaled      {E_solute_scaled}")
     print(f"E_solute_not_scaled  {E_solute_not_scaled}")
     print(f"E_solvent            {E_solvent}")
