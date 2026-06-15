@@ -365,11 +365,12 @@ def test_peptide_protein_complex(tmp_path):
     assert pytest.approx(Total_rest2 / Total_sys, tolerance) == 1.0
 
     (
-        E_solute_scaled,
+        E_frac_dict,
         E_solute_not_scaled,
         E_solvent,
         solvent_solute_nb,
     ) = test.compute_all_energies()
+    E_solute_scaled = sum(E_frac_dict.values(), 0 * unit.kilojoules_per_mole)
 
     print(f"E_solute_scaled      {E_solute_scaled}")
     print(f"E_solute_not_scaled  {E_solute_not_scaled}")
@@ -509,11 +510,12 @@ def test_peptide_protein_complex(tmp_path):
                         ) == 1.0
 
         (
-            E_solute_scaled_new,
+            E_frac_dict_new,
             E_solute_not_scaled_new,
             E_solvent_new,
             solvent_solute_nb_new,
         ) = test.compute_all_energies()
+        E_solute_scaled_new = sum(E_frac_dict_new.values(), 0 * unit.kilojoules_per_mole)
 
         print(f"E_solute_scaled      {E_solute_scaled_new}")
         print(f"E_solute_not_scaled  {E_solute_not_scaled_new}")

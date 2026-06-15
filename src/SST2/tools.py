@@ -983,11 +983,23 @@ def compute_ladder_num(generic_name, min_temp, max_temp, sst2_score=False):
     # Extract potential energy
     if sst2_score:
         logger.info("- Extract SST2 potential energy")
-        # SST1 case :
-        if "Solute not scaled(kJ/mol)" in df_sim.columns:
+
+        # New REST2 reporter format: per-fraction columns + "Solute not scaled (kJ/mole)"
+        frac_cols = [col for col in df_sim.columns if col.startswith("E frac ")]
+        if frac_cols:
+            # New format (post-refactor)
+            solute_scaled = sum(df_sim[col] for col in frac_cols)
+            solute_not_scaled = df_sim["Solute not scaled (kJ/mole)"]
+            solute_solvent = df_sim["Solute-Solvent (kJ/mole)"]
+            df_sim["Solute(kJ/mol)"] = solute_scaled + solute_not_scaled
+            df_sim["Solute-Solvent(kJ/mol)"] = solute_solvent
+        elif "Solute not scaled(kJ/mol)" in df_sim.columns:
+            # Legacy SST1-style format
             df_sim["Solute(kJ/mol)"] = (
                 df_sim["Solute scaled(kJ/mol)"] + df_sim["Solute not scaled(kJ/mol)"]
             )
+        # else: "Solute(kJ/mol)" already present in df_sim
+
         df_sim["new_pot"] = (
             df_sim["Solute(kJ/mol)"]
             + 0.5 * (max_temp / min_temp) ** 0.5 * df_sim["Solute-Solvent(kJ/mol)"]

@@ -169,7 +169,8 @@ def test_peptide_protein_complex(tmp_path):
     assert ener_df["Step"].iloc[-1] == tot_steps
     assert ener_df["Aim Temp (K)"].max() <= 500.0
     assert ener_df["Aim Temp (K)"].min() == 300.0
-    assert ener_df["E solute scaled (kJ/mole)"].mean() == pytest.approx(-709, abs=500)
+    frac_cols = [col for col in ener_df.columns if col.startswith("E frac ")]
+    assert sum(ener_df[col].mean() for col in frac_cols) == pytest.approx(-709, abs=500)
     assert ener_df["E solute not scaled (kJ/mole)"].mean() == pytest.approx(
         448.0, abs=50
     )
