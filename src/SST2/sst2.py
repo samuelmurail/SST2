@@ -44,31 +44,50 @@ class SST2Reporter(object):
         steps = min(steps1, steps2)
         isUpdateAttempt = steps1 == steps
         return (steps, False, isUpdateAttempt, False, isUpdateAttempt)
-
+    
     def report(self, simulation, state):
+        """Generate a report.
+
+        Parameters
+        ----------
+        simulation : Simulation
+            The current simulation
+        state : State
+            The current state of the simulation
+        """
         energie_group = self.sst2.rest2.compute_all_energies()
-        # energie = st.rest2.get_customPotEnergie()
-        # E = Bi*Epp + (B0Bi)**0.5 Epw
-        # print(energie_group)
-        # energie = self.sst2.inverseTemperatures[self.sst2.currentTemperature] * energie_group[0] +\
-        #    (self.sst2.inverseTemperatures[self.sst2.currentTemperature]*self.sst2.inverseTemperatures[0])**0.5 * energie_group[2]
-        # energie *= unit.kilojoule / unit.mole
-        # print('Energie', energie)
-        self.sst2._e_num[self.sst2.currentTemperature] += 1
-        self.sst2._e_solute_avg[self.sst2.currentTemperature] += (
-            energie_group[0] - self.sst2._e_solute_avg[self.sst2.currentTemperature]
-        ) / self.sst2._e_num[self.sst2.currentTemperature]
-        self.sst2._e_solute_solv_avg[self.sst2.currentTemperature] += (
-            energie_group[3]
-            - self.sst2._e_solute_solv_avg[self.sst2.currentTemperature]
-        ) / self.sst2._e_num[self.sst2.currentTemperature]
-        # print(energie_group[0], energie_group[3])
-        # print([ener._value for ener in st._e_solute_avg])
-        # print([ener._value for ener in st._e_solute_solv_avg])
+
+        E_frac_dict   = energie_group[0]  # {frac: unscaled_energy}
+        E_pw_unscaled = energie_group[3]  # unscaled E_pw
+
+        temp_idx = self.sst2.currentTemperature
+
+        # ------------------------------------------------------------------ #
+        # Update running averages (online mean: avg += (x - avg) / n)        #
+        # ------------------------------------------------------------------ #
+        self.sst2._e_num[temp_idx] += 1
+        n = self.sst2._e_num[temp_idx]
+
+        # Per-fraction unscaled averages
+        for k, frac in enumerate(self.sst2._e_fracs):
+            E_t = E_frac_dict.get(frac, 0 * unit.kilojoules_per_mole)
+            self.sst2._e_frac_avg[temp_idx][k] += (
+                E_t - self.sst2._e_frac_avg[temp_idx][k]
+            ) / n
+
+        # Solute-solvent unscaled average
+        self.sst2._e_solute_solv_avg[temp_idx] += (
+            E_pw_unscaled - self.sst2._e_solute_solv_avg[temp_idx]
+        ) / n
+
+        # ------------------------------------------------------------------ #
+        # Report and temperature change                                       #
+        # ------------------------------------------------------------------ #
         if simulation.currentStep % self.sst2.reportInterval == 0:
             self.sst2._writeReport(energie_group)
+
         if simulation.currentStep % self.sst2.tempChangeInterval == 0:
-            self.sst2._attemptTemperatureChange(energie_group[0], energie_group[3])
+            self.sst2._attemptTemperatureChange(E_frac_dict, E_pw_unscaled)
 
 
 class SST2(object):
@@ -204,7 +223,10 @@ class SST2(object):
         self.inverseTemperatures = [
             1.0 / (unit.MOLAR_GAS_CONSTANT_R * t) for t in self.temperatures
         ]
-
+        self.lambdas = [
+            self.temperatures[self.temp_ref_index] / T
+            for T in self.temperatures
+        ]
         # If necessary, open the file we will write reports to.
 
         self._openedFile = isinstance(reportFile, str)
@@ -245,107 +267,214 @@ class SST2(object):
 
         # Write out the header line.
 
-        headers = [
-            "Step",
-            "Aim Temp (K)",
-            "E solute scaled (kJ/mole)",
-            "E solute not scaled (kJ/mole)",
-            "E solvent (kJ/mole)",
-            "E solvent-solute (kJ/mole)",
+        frac_headers = [
+            f"E frac {frac} (kJ/mole)" for frac in self._e_fracs
         ]
-        print((",").join(headers), file=self._out)
+        headers = (
+            ["Step", "Aim Temp (K)"]
+            + frac_headers
+            + [
+                "E solute not scaled (kJ/mole)",
+                "E solvent (kJ/mole)",
+                "E solvent-solute (kJ/mole)",
+            ]
+        )
+        print(",".join(headers), file=self._out)
 
+        
     def compute_starting_weight(self, restart_files, restart_files_full):
         """Compute the weight factor for each temperature.
 
         Parameters
         ----------
-        restart_files: list of strings
-            Files to read restart information to, specified as a file name
-        restart_files_full: string
-            Full Rest2 files to read restart information to, specified as a file name
+        restart_files : list of strings
+            Files to read restart information from, specified as file names
+        restart_files_full : list of strings
+            Full REST2 files to read restart information from, specified as file names
 
         Returns
         -------
-        first_temp_index: int
+        first_temp_index : int
             Index of the last used temperature to use
         """
         numTemperatures = len(self.temperatures)
-        # Initialize the energy arrays.
-        self._e_num = [0] * numTemperatures
-        self._e_solute_avg = [0.0 * unit.kilojoules_per_mole] * numTemperatures
-        self._e_solute_solv_avg = [0.0 * unit.kilojoules_per_mole] * numTemperatures
+
+        # ------------------------------------------------------------------ #
+        # Initialize energy arrays                                            #
+        # ------------------------------------------------------------------ #
+        self._e_num  = [0] * numTemperatures
+
+        # Per-fraction averages: fracs from REST2 force setup
+        # e.g. [0.25, 0.5, 0.75, 1.0] for torsions, [0.5] for LJ14 boundary
+        self._e_fracs = self.rest2.fractional_terms
+        # shape: (n_temps, n_fracs) — unscaled energy per fraction group
+        self._e_frac_avg = [
+            [0.0 * unit.kilojoules_per_mole] * len(self._e_fracs)
+            for _ in range(numTemperatures)
+        ]
+
+        # Solute-solvent (frac=0.5) average — unscaled E_pw
+        self._e_solute_solv_avg = [
+            0.0 * unit.kilojoules_per_mole
+        ] * numTemperatures
+
+        # Weights
         self._weights = [0.0] * numTemperatures
 
-        # For restart, weight should be recomputed based on previous results
+        # ------------------------------------------------------------------ #
+        # Restart case                                                        #
+        # ------------------------------------------------------------------ #
         if restart_files is not None and restart_files_full is not None:
-            df_sim = pd.read_csv(restart_files[0])
+
+            # --- Load and concatenate restart CSVs ---
+            df_sim  = pd.read_csv(restart_files[0])
             df_temp = pd.read_csv(restart_files_full[0])
 
             for i in range(1, len(restart_files)):
                 logger.info(f"Reading part {i}")
-                df_sim_part = pd.read_csv(restart_files[i])
-                df_temp_part = pd.read_csv(restart_files_full[i])
-
                 df_sim = (
-                    pd.concat([df_sim, df_sim_part], axis=0, join="outer")
-                    .reset_index()
-                    .drop(["index"], axis=1)
+                    pd.concat(
+                        [df_sim, pd.read_csv(restart_files[i])],
+                        axis=0, join="outer",
+                    )
+                    .reset_index(drop=True)
                 )
                 df_temp = (
-                    pd.concat([df_temp, df_temp_part], axis=0, join="outer")
-                    .reset_index()
-                    .drop(["index"], axis=1)
+                    pd.concat(
+                        [df_temp, pd.read_csv(restart_files_full[i])],
+                        axis=0, join="outer",
+                    )
+                    .reset_index(drop=True)
                 )
 
-            # Remove Nan rows (rare cases of crashes)
-            df_sim = df_sim[df_sim.iloc[:, 0].notna()]
+            # Remove NaN rows (rare cases of crashes)
+            df_sim  = df_sim[df_sim.iloc[:, 0].notna()].copy()
+            df_temp = df_temp[df_temp.iloc[:, 0].notna()].copy()
+
             df_sim["Temperature (K)"] = df_temp["Aim Temp (K)"]
-            temp_array = df_sim["Temperature (K)"].unique()
-            temp_array.sort()
-            logger.info(temp_array)
+            temp_array = np.sort(df_sim["Temperature (K)"].unique())
+            logger.info(f"Temperatures found: {temp_array}")
 
-            # Remove Nan rows (rare cases of crashes)
-            df_temp = df_temp[df_temp.iloc[:, 0].notna()]
+            # --- Per-fraction column names ---
+            # Expected CSV columns: "E frac 0.25 (kJ/mole)", "E frac 0.5 (kJ/mole)", ...
+            frac_col = {
+                frac: f"E frac {frac} (kJ/mole)"
+                for frac in self._e_fracs
+            }
 
+            # Check all fraction columns are present
+            missing = [
+                col for col in frac_col.values()
+                if col not in df_temp.columns
+            ]
+            if missing:
+                # Fallback: try to read legacy single "E solute scaled" column
+                # and assign it entirely to frac=1.0
+                logger.warning(
+                    f"Per-fraction columns not found: {missing}. "
+                    f"Falling back to legacy 'E solute scaled (kJ/mole)' column."
+                )
+                use_legacy = True
+            else:
+                use_legacy = False
+
+            # --- Fill per-temperature averages ---
             for temp_index, temp in enumerate(temp_array):
                 df_local = df_temp[df_temp["Aim Temp (K)"] == temp]
                 self._e_num[temp_index] = len(df_local)
-                self._e_solute_avg[temp_index] = (
-                    df_local["E solute scaled (kJ/mole)"].mean()
-                    * unit.kilojoules_per_mole
-                )
+
+                if use_legacy:
+                    # Legacy: "E solute scaled (kJ/mole)" stored λ·E_pp (scaled).
+                    # Divide by λ_i to recover the unscaled energy expected here.
+                    legacy_avg = (
+                        df_local["E solute scaled (kJ/mole)"].mean()
+                        / self.lambdas[temp_index]
+                        * unit.kilojoules_per_mole
+                    )
+                    for k, frac in enumerate(self._e_fracs):
+                        self._e_frac_avg[temp_index][k] = (
+                            legacy_avg if frac == 1.0
+                            else 0.0 * unit.kilojoules_per_mole
+                        )
+                else:
+                    # Per-fraction averages from CSV
+                    for k, frac in enumerate(self._e_fracs):
+                        self._e_frac_avg[temp_index][k] = (
+                            df_local[frac_col[frac]].mean()
+                            * unit.kilojoules_per_mole
+                        )
+
+                # Solute-solvent average
                 self._e_solute_solv_avg[temp_index] = (
                     df_local["E solvent-solute (kJ/mole)"].mean()
                     * unit.kilojoules_per_mole
                 )
 
+            # --- Find last used temperature index ---
             first_temp_index = 0
             for index, row in df_sim.iloc[::-1].iterrows():
                 if index % (50 * 10) == 0:
-                    temp_index = np.where(temp_array == row["Temperature (K)"])[0][0]
-                    first_temp_index = temp_index
+                    first_temp_index = np.where(
+                        temp_array == row["Temperature (K)"]
+                    )[0][0]
                     break
 
-            logger.info(self._e_num)
-            logger.info(self._e_solute_avg)
-            logger.info(self._e_solute_solv_avg)
-            logger.info(f"last temperature = {temp_array[first_temp_index]}")
+            # --- Logging ---
+            logger.info(f"Sample counts per temperature: {self._e_num}")
+            for k, frac in enumerate(self._e_fracs):
+                logger.info(
+                    f"E frac {frac} averages: "
+                    f"{[avg._value for avg in [row[k] for row in self._e_frac_avg]]}"
+                )
+            logger.info(
+                f"E solute-solvent averages: "
+                f"{[e._value for e in self._e_solute_solv_avg]}"
+            )
+            logger.info(
+                f"Last temperature: {temp_array[first_temp_index]} K"
+            )
+
             return first_temp_index
+
         else:
             return 0
-
+        
     def _writeReport(self, energie_group):
         """Write out a line to the report."""
+
+        E_frac_dict         = energie_group[0]  # {frac: unscaled_energy}
+        E_solute_not_scaled = energie_group[1]
+        E_solvent           = energie_group[2]
+        E_solute_solvent    = energie_group[3]
+
         temperature = self.temperatures[self.currentTemperature].value_in_unit(
             unit.kelvin
         )
-        values = [temperature] + [energie._value for energie in energie_group]
-        print(
-            ("%d," % self.simulation.currentStep) + ",".join("%g" % v for v in values),
-            file=self._out,
+
+        # Per-fraction values in sorted fraction order
+        frac_values = [
+            E_frac_dict.get(frac, 0 * unit.kilojoules_per_mole).value_in_unit(
+                unit.kilojoule_per_mole
+            )
+            for frac in self._e_fracs
+        ]
+
+        values = (
+            [temperature]
+            + frac_values
+            + [
+                E_solute_not_scaled.value_in_unit(unit.kilojoule_per_mole),
+                E_solvent.value_in_unit(unit.kilojoule_per_mole),
+                E_solute_solvent.value_in_unit(unit.kilojoule_per_mole),
+            ]
         )
 
+        print(
+            ("%d," % self.simulation.currentStep)
+            + ",".join("%g" % v for v in values),
+            file=self._out,
+        )
+    
     def __del__(self):
         if self._openedFile:
             self._out.close()
@@ -359,97 +488,116 @@ class SST2(object):
         self.simulation.step(steps)
 
     def _compute_weight(self, i, j):
-        r"""Compute the difference of weight $w_j - w_i$
-        using the following equation:
+        r"""Compute the difference of weight $w_j - w_i$:
 
-        $$(w_j - w_i) = (\beta_j - \beta_i) \frac{ (\braket{E_{pp}^{(1)}}_i -  \braket{E_{pp}^{(1)}}_j)}{2} +  (\sqrt{\beta_{ref} \beta_j} - \sqrt{\beta_{ref} \beta_i}) \frac {(\braket{E_{pw}}_i - \braket{E_{pw}}_j)}{2}$$
+        $$(w_j - w_i) = \sum_t (\lambda_j^{f_t} - \lambda_i^{f_t})
+        \frac{\langle \tilde{E}_t \rangle_i + \langle \tilde{E}_t \rangle_j}{2}
+        + (\lambda_j^{1/2} - \lambda_i^{1/2})
+        \frac{\langle \tilde{E}_{pw} \rangle_i + \langle \tilde{E}_{pw} \rangle_j}{2}$$
+
+        If state j has no samples yet, only state i averages are used.
+
+        Parameters
+        ----------
+        i : int
+            Current temperature index
+        j : int
+            Target temperature index
+
+        Returns
+        -------
+        weight : unit.Quantity
+            Weight difference w_j - w_i
         """
+        lambda_i = self.lambdas[i]
+        lambda_j = self.lambdas[j]
+        j_has_samples = self._e_num[j] != 0
 
-        if self._e_num[j] != 0:
-            avg_ener_solut = self._e_solute_avg[i] / 2
-            avg_ener_solut += self._e_solute_avg[j] / 2
-            avg_ener_solut_solv = self._e_solute_solv_avg[i] / 2
-            avg_ener_solut_solv += self._e_solute_solv_avg[j] / 2
+        weight = 0 * unit.kilojoules_per_mole
 
-        else:
-            avg_ener_solut = self._e_solute_avg[i]
-            avg_ener_solut_solv = self._e_solute_solv_avg[i]
+        # Sum over all fractional energy terms
+        for k, frac in enumerate(self._e_fracs):
+            avg_i = self._e_frac_avg[i][k]
+            avg_j = self._e_frac_avg[j][k] if j_has_samples else avg_i
+            avg   = (avg_i + avg_j) / 2 if j_has_samples else avg_i
 
-        weight = (
-            self.inverseTemperatures[j] - self.inverseTemperatures[i]
-        ) * avg_ener_solut
-        weight += avg_ener_solut_solv * (
-            (
-                self.inverseTemperatures[j]
-                * self.inverseTemperatures[self.temp_ref_index]
-            )
-            ** 0.5
-            - (
-                self.inverseTemperatures[i]
-                * self.inverseTemperatures[self.temp_ref_index]
-            )
-            ** 0.5
-        )
+            weight += (lambda_j ** frac - lambda_i ** frac) * avg
+
+        # Solute-solvent term (frac = 0.5)
+        avg_pw_i = self._e_solute_solv_avg[i]
+        avg_pw_j = self._e_solute_solv_avg[j] if j_has_samples else avg_pw_i
+        avg_pw   = (avg_pw_i + avg_pw_j) / 2 if j_has_samples else avg_pw_i
+
+        weight += (lambda_j ** 0.5 - lambda_i ** 0.5) * avg_pw
 
         return weight
 
-    def _attemptTemperatureChange(self, ener_solut, ener_solut_solv):
-        """Attempt to move to a different temperature."""
 
+
+    def _attemptTemperatureChange(self, E_frac_dict, E_pw_unscaled):
+        """Attempt to move to a different temperature.
+
+        Acceptance log probability:
+        $$\\Delta_{i \\to j} = \\sum_t (\\lambda_i^{f_t} - \\lambda_j^{f_t})
+        \\cdot \\tilde{E}_t(X)
+        + (\\lambda_i^{1/2} - \\lambda_j^{1/2}) \\cdot \\tilde{E}_{pw}(X)
+        + (w_j - w_i)$$
+
+        Parameters
+        ----------
+        E_frac_dict : dict {frac: unit.Quantity}
+            Unscaled energy per fraction group at current configuration
+        E_pw_unscaled : unit.Quantity
+            Unscaled solute-solvent energy at current configuration
+        """
+        temp_i   = self.currentTemperature
+        lambda_i = self.lambdas[temp_i]
+
+        # Build list of neighboring temperature indices
         temp_list = []
-
-        temp_i = self.currentTemperature
-
-        if self.currentTemperature != 0:
+        if temp_i != 0:
             temp_list.append(temp_i - 1)
-        if self.currentTemperature < (len(self._weights) - 1):
+        if temp_i < len(self._weights) - 1:
             temp_list.append(temp_i + 1)
 
         logProbability = []
-        # Compute Delta_(i,j) = (Bi-Bj)Epp + ((BrefBi)**0.5 - (BrefBj)**0.5)Epw - (fi-fj)
         for j in temp_list:
-            log_prob = (
-                self.inverseTemperatures[temp_i] - self.inverseTemperatures[j]
-            ) * ener_solut
-            log_prob += (
-                (
-                    self.inverseTemperatures[temp_i]
-                    * self.inverseTemperatures[self.temp_ref_index]
-                )
-                ** 0.5
-                - (
-                    self.inverseTemperatures[j]
-                    * self.inverseTemperatures[self.temp_ref_index]
-                )
-                ** 0.5
-            ) * ener_solut_solv
-            weight = self._compute_weight(temp_i, j)
-            log_prob += weight
-            logProbability.append(log_prob)
+            lambda_j = self.lambdas[j]
 
-        probability = [np.exp(x) for x in logProbability]
+            # Sum over fractional terms: (lambda_i^f - lambda_j^f) * E_t_unscaled
+            log_prob = 0 * unit.kilojoules_per_mole
+            for frac in self._e_fracs:
+                E_t = E_frac_dict.get(frac, 0 * unit.kilojoules_per_mole)
+                log_prob += (lambda_i ** frac - lambda_j ** frac) * E_t
 
-        # To avoid trying always i-1 in first
-        # add a random on which temp index to test first.
-        # Might need to compute the combinatory of p(i-1), p(i+1)
-        # to compute p(i)
+            # Solute-solvent contribution: (lambda_i^0.5 - lambda_j^0.5) * E_pw
+            log_prob += (lambda_i ** 0.5 - lambda_j ** 0.5) * E_pw_unscaled
+
+            # Weight difference w_j - w_i
+            log_prob += self._compute_weight(temp_i, j)
+
+            logProbability.append(log_prob._value)
+
+        # Metropolis criterion: p = exp(log_prob / kT)
+        # Note: log_prob is already in energy units (kJ/mol),
+        # kT = kB * T_ref in kJ/mol
+        kT = unit.BOLTZMANN_CONSTANT_kB * self.temperatures[self.temp_ref_index] * unit.AVOGADRO_CONSTANT_NA
+        kT = kT.value_in_unit(unit.kilojoule_per_mole)
+
+        probability = [np.exp(lp / kT) for lp in logProbability]
+
+        # Shuffle to avoid systematic bias toward lower temperature
         index_list = list(range(len(temp_list)))
         random.shuffle(index_list)
         r = random.random()
 
         for i in index_list:
-
             if r < probability[i]:
-                # print(f"SWITCH {self.currentTemperature:2} -> {temp_list[i]:2}")
-                # Select the new temperature.
                 self.currentTemperature = temp_list[i]
-                # self.simulation.integrator.setTemperature(self.temperatures[i])
                 self.rest2.scale_nonbonded_torsion(
-                    self.temperatures[self.temp_ref_index]
-                    / self.temperatures[temp_list[i]]
+                    self.lambdas[temp_list[i]]
                 )
                 break
-
 
 def run_sst2(
     sys_rest2,

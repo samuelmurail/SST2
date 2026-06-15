@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class Rest2Reporter(object):
-    """Reporter for REST2 simulation
+    """Reporter for REST2 simulation.
 
     Attributes
     ----------
@@ -54,64 +54,76 @@ class Rest2Reporter(object):
         The interval (in time steps) at which to write frames
     rest2 : REST2
         The REST2 object to generate the report
-
-    Methods
-    -------
-    describeNextReport(simulation)
-        Generate a report.
-
-
     """
 
     def __init__(self, file, reportInterval, rest2):
-        self._out = open(file, "w", buffering=1)
-        self._out.write(
-            "Step,Lambda,Solute scaled(kJ/mol),Solute not scaled(kJ/mol),Solvent(kJ/mol),Solute-Solvent(kJ/mol)\n"
-        )
         self._reportInterval = reportInterval
         self._rest2 = rest2
+
+        # Build header dynamically from fractions available in this system
+        self._fracs = self._rest2.fractional_terms
+        
+        frac_headers = ",".join(
+            f"E frac {frac} (kJ/mole)" for frac in self._fracs
+        )
+
+        self._out = open(file, "w", buffering=1)
+        self._out.write(
+            f"Step,Lambda,"
+            f"{frac_headers},"
+            f"Solute not scaled (kJ/mole),"
+            f"Solvent (kJ/mole),"
+            f"Solute-Solvent (kJ/mole)\n"
+        )
 
     def __del__(self):
         self._out.close()
 
     def describeNextReport(self, simulation):
-        steps = self._reportInterval - simulation.currentStep % self._reportInterval
+        steps = (
+            self._reportInterval
+            - simulation.currentStep % self._reportInterval
+        )
         return (steps, False, False, False, False, None)
 
     def report(self, simulation, state):
         """Generate a report.
+
         Compute the energies of:
-        - the solute scaled
+        - per-fraction unscaled solute energies (one column per fraction)
         - the solute not scaled
         - the solvent
-        - the solute-solvent
-
-        Then write them to the file (`self._out`).
+        - the solute-solvent (unscaled)
 
         Parameters
         ----------
+        simulation : Simulation
+            The current simulation
         state : State
             The current state of the simulation
-
-        Returns
-        -------
-        None
-
         """
-
         energies = self._rest2.compute_all_energies()
 
-        # E_solute_scaled, E_solute_not_scaled, E_solvent, solvent_solute_nb
+        E_frac_dict         = energies[0]   # {frac: unscaled_energy}
+        E_solute_not_scaled = energies[1]
+        E_solvent           = energies[2]
+        E_solute_solvent    = energies[3]
 
         step = state.getStepCount()
-        self._out.write(
-            f"{step},{self._rest2.scale:.3f},"
-            f"{energies[0].value_in_unit(unit.kilojoule_per_mole):.2f},"
-            f"{energies[1].value_in_unit(unit.kilojoule_per_mole):.2f},"
-            f"{energies[2].value_in_unit(unit.kilojoule_per_mole):.2f},"
-            f"{energies[3].value_in_unit(unit.kilojoule_per_mole):.2f}\n"
+
+        # Per-fraction energy columns (0.0 if fraction not present in system)
+        frac_values = ",".join(
+            f"{E_frac_dict.get(frac, 0 * unit.kilojoules_per_mole).value_in_unit(unit.kilojoule_per_mole):.2f}"
+            for frac in self._fracs
         )
 
+        self._out.write(
+            f"{step},{self._rest2.scale:.3f},"
+            f"{frac_values},"
+            f"{E_solute_not_scaled.value_in_unit(unit.kilojoule_per_mole):.2f},"
+            f"{E_solvent.value_in_unit(unit.kilojoule_per_mole):.2f},"
+            f"{E_solute_solvent.value_in_unit(unit.kilojoule_per_mole):.2f}\n"
+        )
 
 class REST2:
     """REST2 class
@@ -251,6 +263,7 @@ class REST2:
         self.positions = pdb.positions
         self.topology = pdb.topology
         self.solute_index = solute_index
+        self.fractional_terms = []
         self.solvent_index = list(
             set(range(self.system.getNumParticles())).difference(set(self.solute_index))
         )
@@ -391,6 +404,10 @@ class REST2:
             barostatInterval=barostatInterval,
             platform_name=platform_name,
         )
+
+
+        self.fractional_terms = sorted(set(self.fractional_terms))
+        logger.info(f"- Fractional terms: {self.fractional_terms}")
 
         logger.info("- REST2 object forces:")
         print_forces(self.system, self.simulation)
@@ -625,6 +642,7 @@ class REST2:
                     logger.info(f"- Create CMAP torsions force for solute with {solute_in}/8 solute atoms /8")
                     solute_cmap_dict[solute_in] = openmm.CMAPTorsionForce()
                     solute_cmap_dict[solute_in].setName(f"CMAP_solute_{solute_in}/8")
+                    self.fractional_terms.append(solute_in/8.0)
                 solute_cmap_dict[solute_in].addTorsion(*cmap_indexes)
             else:
                 raise ValueError("CMap not in solute or solvent")
@@ -810,6 +828,8 @@ class REST2:
                     f"({solute_scaled_torsion_forces[frac].getNumTorsions()} torsions)"
                 )
                 self.system.addForce(solute_scaled_torsion_forces[frac])
+                self.fractional_terms.append(frac/4.0)
+
 
         logger.info("- Delete original Torsion Forces")
         for count, force in enumerate(self.system.getForces()):
@@ -1416,19 +1436,13 @@ class REST2:
 
     def compute_all_energies(self):
         """Extract solute potential energy and solute-solvent interactions.
-        
-        Unscales each force contribution by the correct factor:
-        - Scaled solute NB (NonbondedForce, LennardJones): divide by scale
-        - Fractional full-system terms (LJ14, torsions, CMAP): divide by scale^(k/l)
-        - Solute-solvent nonbonded: divide by scale^0.5
-        - All other solute terms: no correction
 
         Returns
         -------
-        E_solute_scaled : unit.Quantity
-            Unscaled solute-solute scaled energy (NB + LJ14 + torsions + CMAP)
+        E_frac_dict : dict {frac: unit.Quantity}
+            Unscaled energy per fraction group, e.g. {0.25: ..., 0.5: ..., 1.0: ...}
         E_solute_not_scaled : unit.Quantity
-            Solute energy terms not scaled in REST2 (bonds, angles, torsions, CMAP)
+            Solute energy terms not scaled in REST2 (bonds, angles, impropers)
         E_solvent : unit.Quantity
             Solvent energy
         E_solute_solvent_nb : unit.Quantity
@@ -1453,35 +1467,28 @@ class REST2:
                     bonded_rf_pp = force["energy"]
                 elif force["name"] in ["HarmonicBondForce", "HarmonicAngleForce"]:
                     E_solute_not_scaled += force["energy"]
-            
-            E_solute_scaled = 0 * unit.kilojoules_per_mole
-            E_solute_scaled += nonbonded_rf_pp + bonded_rf_pp
 
-            solute_torsion_scaled_flag = True
+            E_solute_scaled = nonbonded_rf_pp + bonded_rf_pp
+
+            solute_torsion_scaled_flag    = True
             solute_torsion_not_scaled_flag = True
 
             for i, force in system_force.items():
-                # Only the first CustomTorsionForce is the scaled solute one
                 if force["name"] == "CustomTorsionForce" and solute_torsion_scaled_flag:
-                    # print(f"Add {force['name']} energy to E_solute_scaled = {force['energy']}")
                     E_solute_scaled += force["energy"]
                     solute_torsion_scaled_flag = False
-                elif (
-                    force["name"] == "CustomTorsionForce" and solute_torsion_not_scaled_flag
-                ):
+                elif force["name"] == "CustomTorsionForce" and solute_torsion_not_scaled_flag:
                     E_solute_not_scaled += force["energy"]
                     solute_torsion_not_scaled_flag = False
                     break
 
-            solvent_solute_nb = nonbonded_rf_wp + bonded_rf_wp  
+            solvent_solute_nb = nonbonded_rf_wp + bonded_rf_wp
 
-            # print(f"E_solute_scaled: {E_solute_scaled}")
-            # print(f"solvent_solute_nb: {solvent_solute_nb}")
-
+            # Reaction field: single fraction=1.0, return as dict
             return (
-                (1 / self.scale) * E_solute_scaled,
+                {1.0: (1 / self.scale) * E_solute_scaled},
                 E_solute_not_scaled,
-                0 * unit.kilojoules_per_mole, # Not computed here
+                0 * unit.kilojoules_per_mole,
                 (1 / self.scale) ** 0.5 * solvent_solute_nb,
             )
 
@@ -1489,11 +1496,6 @@ class REST2:
             self.compute_solute_solvent_system_energy()
         )
 
-        # ------------------------------------------------------------------ #
-        # Helper: unscale factor for a given fraction of solute atoms         #
-        # scale = lambda = T0/T, so scaled_energy = scale^frac * true_energy  #
-        # true_energy = scaled_energy / scale^frac                            #
-        # ------------------------------------------------------------------ #
         def unscale(energy, frac=1.0):
             return energy / (self.scale ** frac)
 
@@ -1501,44 +1503,41 @@ class REST2:
         # 1. Solute system                                                    #
         # ------------------------------------------------------------------ #
 
-        # Scaled at full lambda in solute system
-        SOLUTE_NB_SCALED = {
-            "NonbondedForce",
-            # "LennardJones",       # CHARMM NBFIX, useless, it should cancel
-        }
-        # Not scaled — only needed for solute_nb subtraction
-        SOLUTE_NB_RAW = {
-            "LennardJones14",     # CHARMM LJ14 — detail handled in full system
-        }
-        # Not scaled — direct energy terms
+        SOLUTE_NB_SCALED = {"NonbondedForce"}
+        SOLUTE_NB_RAW    = {"LennardJones14"}
         SOLUTE_NOT_SCALED = {
             "HarmonicBondForce",
             "HarmonicAngleForce",
             "CustomTorsionForce",   # CHARMM impropers
         }
-
         NOT_USED = {
-            "PeriodicTorsionForce", # founded in the full system
-            "CMAPTorsionForce",     # founded in the full system
+            "PeriodicTorsionForce",
+            "CMAPTorsionForce",
             "CMMotionRemover",
             "Total",
         }
 
-        E_solute_raw     = 0 * unit.kilojoules_per_mole
-        E_solute_scaled     = 0 * unit.kilojoules_per_mole
+        # Per-fraction unscaled energy accumulator
+        E_frac_dict         = {}   # {frac: unscaled_energy}
         E_solute_not_scaled = 0 * unit.kilojoules_per_mole
         solute_nb           = 0 * unit.kilojoules_per_mole
+
+        def add_frac(energy, frac):
+            """Accumulate unscaled energy into the correct fraction bucket."""
+            unscaled = unscale(energy, frac)
+            if frac not in E_frac_dict:
+                E_frac_dict[frac] = 0 * unit.kilojoules_per_mole
+            E_frac_dict[frac] += unscaled
 
         for force in solute_force.values():
             name   = force["name"]
             energy = force["energy"]
 
             if name in SOLUTE_NB_SCALED:
-                solute_nb       += energy
-                E_solute_scaled += unscale(energy, frac=1.0)
-                E_solute_raw    += energy
+                solute_nb += energy
+                add_frac(energy, frac=1.0)
             elif name in SOLUTE_NB_RAW:
-                solute_nb += energy          # subtraction only, no unscaling
+                solute_nb += energy     # subtraction only, no unscaling
             elif name in SOLUTE_NOT_SCALED:
                 E_solute_not_scaled += energy
             elif name in NOT_USED:
@@ -1571,7 +1570,7 @@ class REST2:
                 solvent_nb += energy
             if name in SOLVENT_TERMS:
                 E_solvent += energy
-            elif name in {"CMMotionRemover"}:
+            elif name == "CMMotionRemover":
                 pass
 
         # ------------------------------------------------------------------ #
@@ -1579,26 +1578,16 @@ class REST2:
         # ------------------------------------------------------------------ #
 
         TORSION_SCALED_PREFIX = "Torsion_solute_scaled_"
-        TORSION_NOT_SCALED = "Torsion_solute_not_scaled"
         CMAP_SOLUTE_PREFIX    = "CMAP_solute_"
 
-        SYSTEM_SCALED_FULL = {
-            "LJ14_solute_solute",
-        }
-        SYSTEM_SCALED_BOUNDARY = {
-            "LJ14_solute_boundary",
-        }
-        SYSTEM_NB = {
-            "NonbondedForce",
-            # "LennardJones",      # CHARMM NBFIX, useless, it should canceled
-        }
+        SYSTEM_NB = {"NonbondedForce"}
+
         SYSTEM_IGNORED = {
             "CMMotionRemover",
             "MonteCarloBarostat",
             "HarmonicBondForce",
             "HarmonicAngleForce",
             "CustomTorsionForce",
-            "HarmonicBondForce",
             "Torsion_solvent",
             "Torsion_solute_not_scaled",
             "CMAP_solvent",
@@ -1615,27 +1604,23 @@ class REST2:
             if name in SYSTEM_NB:
                 all_nb += energy
 
-            elif name in SYSTEM_SCALED_FULL:
-                E_solute_scaled += unscale(energy, frac=1.0)
-                E_solute_raw    += energy
+            elif name == "LJ14_solute_solute":
+                add_frac(energy, frac=1.0)
 
-            elif name in SYSTEM_SCALED_BOUNDARY:
-                E_solute_scaled += unscale(energy, frac=0.5)
-                E_solute_raw    += energy
+            elif name == "LJ14_solute_boundary":
+                add_frac(energy, frac=0.5)
 
             elif name.startswith(TORSION_SCALED_PREFIX):
                 # Parse "Torsion_solute_scaled_3/4" → frac = 0.75
                 num, den = name[len(TORSION_SCALED_PREFIX):].split("/")
-                E_solute_scaled += unscale(energy, frac=int(num) / int(den))
-                E_solute_raw    += energy
+                add_frac(energy, frac=int(num) / int(den))
 
             elif name.startswith(CMAP_SOLUTE_PREFIX):
                 # Parse "CMAP_solute_7/8" → frac = 0.875
                 num, den = name[len(CMAP_SOLUTE_PREFIX):].split("/")
-                E_solute_scaled += unscale(energy, frac=int(num) / int(den))
-                E_solute_raw    += energy
-            
-            elif name == TORSION_NOT_SCALED:
+                add_frac(energy, frac=int(num) / int(den))
+
+            elif name == "Torsion_solute_not_scaled":
                 E_solute_not_scaled += energy
 
             elif name in SYSTEM_IGNORED:
@@ -1645,6 +1630,7 @@ class REST2:
                 logger.warning(
                     f"compute_all_energies: unhandled system force '{name}'"
                 )
+
         # ------------------------------------------------------------------ #
         # 4. Solute-solvent nonbonded (by subtraction)                       #
         # ------------------------------------------------------------------ #
@@ -1653,7 +1639,7 @@ class REST2:
         E_solute_solvent_nb = unscale(solute_solvent_nb, frac=0.5)
 
         return (
-            E_solute_scaled,
+            E_frac_dict,
             E_solute_not_scaled,
             E_solvent,
             E_solute_solvent_nb,
@@ -1864,7 +1850,7 @@ if __name__ == "__main__":
     name = "2HPL"
     selection = "chain B"
     selection = "(chain A and resid > 10 and resid < 21)"
-    charmm_use = False
+    charmm_use = True
     platform_name = "OpenCL"   # OpenCL / CUDA / CPU
     nonbondedMethod = app.PME  # app.PME or app.CutoffPeriodic
     target_temperature = 600   # K — the REST2 "hot" replica temperature
@@ -1995,9 +1981,6 @@ if __name__ == "__main__":
         platform_name=platform_name,
     )
 
-    # ------------------------------------------------------------------ #
-    # Helper: print decomposition and compare with reference              #
-    # ------------------------------------------------------------------ #
     def check_decomposition(label, scale):
         print(f"\n{'='*60}")
         print(f"  {label}  (lambda = {scale:.4f})")
@@ -2006,55 +1989,89 @@ if __name__ == "__main__":
         tools.print_forces(test.system, test.simulation)
         forces_rest2 = tools.get_forces(test.system, test.simulation)
 
+        # ------------------------------------------------------------------ #
+        # compute_all_energies() now returns:                                 #
+        #   [0] E_frac_dict         : {frac: unscaled_energy}                #
+        #   [1] E_solute_not_scaled : unit.Quantity                           #
+        #   [2] E_solvent           : unit.Quantity                           #
+        #   [3] E_cross_nb          : unscaled solute-solvent NB              #
+        # ------------------------------------------------------------------ #
         (
-            E_solute_scaled,
+            E_frac_dict,
             E_solute_not_scaled,
             E_solvent,
             E_cross_nb,
         ) = test.compute_all_energies()
 
-        print(f"\ncompute_all_energies() output (unscaled physical energies):")
-        print(f"  E_solute_scaled     = {E_solute_scaled}")
-        print(f"  E_solute_not_scaled = {E_solute_not_scaled}")
-        print(f"  E_solvent           = {E_solvent}")
-        print(f"  E_cross_nb          = {E_cross_nb}")
-
-        # Reconstructed total potential energy from decomposition:
-        # U_REST2(lambda) = lambda*E_sol_scaled + E_sol_not_scaled
-        #                   + E_solvent + sqrt(lambda)*E_cross_nb
-        E_rebuilt = (
-            scale * E_solute_scaled
-            + E_solute_not_scaled
-            + E_solvent
-            + np.sqrt(scale) * E_cross_nb
+        # Sum of all fractional unscaled energies (for display)
+        E_solute_scaled_total = sum(
+            E_frac_dict.values(), 0 * unit.kilojoules_per_mole
         )
+
+        print(f"\ncompute_all_energies() output (unscaled physical energies):")
+        print(f"  E_frac_dict:")
+        for frac, E_t in sorted(E_frac_dict.items()):
+            print(f"    frac={frac:.4f}  E_t = {E_t}")
+        print(f"  E_solute_scaled_total = {E_solute_scaled_total}  (sum of fractions)")
+        print(f"  E_solute_not_scaled   = {E_solute_not_scaled}")
+        print(f"  E_solvent             = {E_solvent}")
+        print(f"  E_cross_nb            = {E_cross_nb}")
+
+        # ------------------------------------------------------------------ #
+        # Reconstruct total REST2 potential energy from decomposition:        #
+        # U_REST2(lambda) = sum_t lambda^f_t * E_t_unscaled                  #
+        #                 + E_solute_not_scaled                               #
+        #                 + E_solvent                                         #
+        #                 + sqrt(lambda) * E_cross_nb                        #
+        # ------------------------------------------------------------------ #
+        E_rebuilt = E_solute_not_scaled + E_solvent
+        for frac, E_t in E_frac_dict.items():
+            E_rebuilt += (scale ** frac) * E_t
+        E_rebuilt += np.sqrt(scale) * E_cross_nb
+
         # Potential energy from the simulation context
-        E_state = test.simulation.context.getState(getEnergy=True).getPotentialEnergy()
+        E_state = test.simulation.context.getState(
+            getEnergy=True
+        ).getPotentialEnergy()
 
         print(f"\nClosure check (rebuilt vs context):")
         print(f"  E_rebuilt (from decomp) = {E_rebuilt}")
         print(f"  E_state   (from context)= {E_state}")
         print(f"  ratio rebuilt/state     = {ratio(E_rebuilt, E_state):.6f}  (expect 1.0)")
 
-        # At lambda=1: decomposed energies must match separate simulations
+        # ------------------------------------------------------------------ #
+        # At lambda=1: decomposed energies must match separate simulations   #
+        # ------------------------------------------------------------------ #
         if abs(scale - 1.0) < 1e-6:
             print(f"\nCompare at lambda=1 with separate simulations:")
+
             # Nonbonded cross term recovered by subtraction
-            rest2_nb = sum_by_name(forces_rest2, NB_NAMES)
+            rest2_nb        = sum_by_name(forces_rest2, NB_NAMES)
             cross_nb_from_sub = rest2_nb - ref_pep_nb - ref_sol_nb
             print(f"  NB cross (subtraction)   = {cross_nb_from_sub}")
             print(f"  NB cross (decomposition) = {E_cross_nb}")
-            print(f"  ratio                    = {ratio(E_cross_nb, cross_nb_from_sub):.6f}  (expect 1.0)")
+            print(
+                f"  ratio                    = "
+                f"{ratio(E_cross_nb, cross_nb_from_sub):.6f}  (expect 1.0)"
+            )
 
             # Total NB should match whole system
             rest2_total_nb = sum_by_name(forces_rest2, NB_NAMES)
             print(f"\n  REST2 total NB = {rest2_total_nb}")
             print(f"  System NB      = {ref_sys_nb}")
-            print(f"  ratio          = {ratio(rest2_total_nb, ref_sys_nb):.6f}  (expect 1.0)")
+            print(
+                f"  ratio          = "
+                f"{ratio(rest2_total_nb, ref_sys_nb):.6f}  (expect 1.0)"
+            )
+
+            # Per-fraction check at lambda=1: scaled == unscaled
+            print(f"\n  Per-fraction energies at lambda=1 (scaled == unscaled):")
+            for frac, E_t in sorted(E_frac_dict.items()):
+                print(f"    frac={frac:.4f}  E_t_unscaled = {E_t}")
 
         print(f"\nREST2 solute forces:")
         tools.print_forces(test.system_solute, test.simulation_solute)
-
+        
     # ------------------------------------------------------------------ #
     # Check at 300 K (lambda = 1)                                         #
     # ------------------------------------------------------------------ #
