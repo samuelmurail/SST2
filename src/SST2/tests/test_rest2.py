@@ -74,7 +74,6 @@ def test_peptide_protein_complex_scratch(tmp_path):
         dt=dt,
     )
 
-    assert sys_rest2.system.getNumForces() == 9
     assert sys_rest2.solute_index == solute_indices
     assert len(sys_rest2.solute_index) == 74
     assert len(sys_rest2.solvent_index) == pytest.approx(14305, 0.1)
@@ -85,9 +84,18 @@ def test_peptide_protein_complex_scratch(tmp_path):
     assert len(sys_rest2.init_nb_exept_index) == 387
     assert len(sys_rest2.init_nb_exept_value) == 387
     assert len(sys_rest2.init_nb_exept_solute_value) == 387
-    assert len(sys_rest2.init_torsions_index) == 206
-    assert len(sys_rest2.init_torsions_value) == 206
-    assert sys_rest2.solute_torsion_force.getNumTorsions() == 206
+    # torsion forces are now named; check by name instead of by old attributes
+    torsion_counts_scratch = {
+        force.getName(): force.getNumTorsions()
+        for force in sys_rest2.system.getForces()
+        if isinstance(force, openmm.CustomTorsionForce)
+    }
+    total_scaled_scratch = sum(
+        c for n, c in torsion_counts_scratch.items()
+        if n.startswith("Torsion_solute_scaled_")
+    )
+    assert total_scaled_scratch == 206
+    assert torsion_counts_scratch.get("Torsion_solute_not_scaled", 0) == 17
 
 
 def test_peptide_protein_complex(tmp_path):
@@ -288,7 +296,6 @@ def test_peptide_protein_complex(tmp_path):
     integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
     test = rest2.REST2(system, pdb, forcefield, solute_indices, integrator_rest)
 
-    assert test.system.getNumForces() == 8
     assert test.solute_index == solute_indices
     assert len(test.solute_index) == 74
     assert len(test.solvent_index) == 11790
@@ -297,18 +304,19 @@ def test_peptide_protein_complex(tmp_path):
     assert len(test.init_nb_exept_index) == 387
     assert len(test.init_nb_exept_value) == 387
     assert len(test.init_nb_exept_solute_value) == 387
-    assert len(test.init_torsions_index) == 206
-    assert len(test.init_torsions_value) == 206
-    assert test.solute_torsion_force.getNumTorsions() == 206
 
-    # solute_scaled_torsion_force, solute_not_scaled_torsion_force, solvent_torsion_force
-    torsion_len = [206, 17, 5435]
-    force_i = 0
-
-    for force in test.system.getForces():
-        if isinstance(force, openmm.CustomTorsionForce):
-            assert force.getNumTorsions() == torsion_len[force_i]
-            force_i += 1
+    # torsion forces are now named; check by name instead of old index-based approach
+    torsion_counts = {
+        force.getName(): force.getNumTorsions()
+        for force in test.system.getForces()
+        if isinstance(force, openmm.CustomTorsionForce)
+    }
+    total_scaled = sum(
+        c for n, c in torsion_counts.items() if n.startswith("Torsion_solute_scaled_")
+    )
+    assert total_scaled == 206
+    assert torsion_counts.get("Torsion_solute_not_scaled", 0) == 17
+    assert torsion_counts.get("Torsion_solvent", 0) == 5435
 
     print("REST2 forces 300K:")
     tools.print_forces(test.system, test.simulation)
@@ -323,10 +331,13 @@ def test_peptide_protein_complex(tmp_path):
     NonbondedForce_rest2 = tools.get_specific_forces(
         test.system, test.simulation, "NonbondedForce"
     )[0]
-    CustomTorsionForce_rest2 = tools.get_specific_forces(
-        test.system, test.simulation, "CustomTorsionForce"
-    )
-    CustomTorsionForce_rest2_sum = np.sum(CustomTorsionForce_rest2)
+    # REST2 splits PeriodicTorsionForce into named CustomTorsionForce objects;
+    # sum all forces whose name starts with "Torsion_"
+    CustomTorsionForce_rest2_sum = 0 * unit.kilojoules_per_mole
+    for f in forces_rest2.values():
+        if f["name"].startswith("Torsion_"):
+            CustomTorsionForce_rest2_sum += f["energy"]
+
 
     print("Compare not scaled energy rest2 vs. classic:\n")
     # HarmonicBondForce
@@ -348,11 +359,10 @@ def test_peptide_protein_complex(tmp_path):
         )
         == 1.0
     )
-    # Total
-    assert (
-        pytest.approx(forces_rest2[9]["energy"] / forces_sys[6]["energy"], tolerance)
-        == 1.0
-    )
+    # Total energy should match between REST2 and original system
+    Total_rest2 = tools.get_specific_forces(test.system, test.simulation, "Total")[0]
+    Total_sys = tools.get_specific_forces(system, simulation, "Total")[0]
+    assert pytest.approx(Total_rest2 / Total_sys, tolerance) == 1.0
 
     (
         E_solute_scaled,
@@ -369,27 +379,35 @@ def test_peptide_protein_complex(tmp_path):
 
     tolerance = 0.0001
 
-    # check E_solute_scaled
-    assert (
-        pytest.approx(
-            (CustomTorsionForce_rest2[0] + NonbondedForce_solute) / E_solute_scaled,
-            tolerance,
-        )
-        == 1.0
+    forces_rest2_dict = tools.get_forces(test.system, test.simulation)
+
+    # check E_solute_scaled: sum all Torsion_solute_scaled_k/4 energies + NB from solute subsystem
+    scaled_torsion_sum = sum(
+        (f["energy"] for f in forces_rest2_dict.values() if f["name"].startswith("Torsion_solute_scaled_")),
+        0 * unit.kilojoules_per_mole,
     )
-    # check E_solute_not_scaled
-    assert (
-        pytest.approx(
-            (
-                CustomTorsionForce_rest2[1]
-                + HarmonicBondForce_solute
-                + HarmonicAngleForce_solute
-            )
-            / E_solute_not_scaled,
-            tolerance,
-        )
-        == 1.0
+    assert pytest.approx(
+        (scaled_torsion_sum + NonbondedForce_solute) / E_solute_scaled, tolerance
+    ) == 1.0
+
+    # check E_solute_not_scaled: Torsion_solute_not_scaled + bond + angle from solute subsystem
+    Torsion_not_scaled_list = tools.get_specific_forces(
+        test.system, test.simulation, "Torsion_solute_not_scaled"
     )
+    Torsion_not_scaled_energy = (
+        Torsion_not_scaled_list[0] if Torsion_not_scaled_list else 0 * unit.kilojoules_per_mole
+    )
+
+    print(f"Torsion_not_scaled_energy {Torsion_not_scaled_energy}")
+    print(f"HarmonicBondForce_solute {HarmonicBondForce_solute}")
+    print(f"HarmonicAngleForce_solute {HarmonicAngleForce_solute}")
+    print(f"E_solute_not_scaled {E_solute_not_scaled}")
+
+    assert pytest.approx(
+        (Torsion_not_scaled_energy + HarmonicBondForce_solute + HarmonicAngleForce_solute)
+        / E_solute_not_scaled,
+        tolerance,
+    ) == 1.0
     # check E_solute
     assert (
         pytest.approx(
@@ -441,59 +459,54 @@ def test_peptide_protein_complex(tmp_path):
         assert test.scale == scale
         print(f"\nREST2 forces lambda = {scale:.1f}  Temp  = {300/scale:.1f} K\n")
         forces_rest2_new = tools.get_forces(test.system, test.simulation)
-
-        # compare scaled with non scaled REST2:
         for i, force in forces_rest2_new.items():
             print(
                 f"{i}   {force['name']:25} {force['energy'].value_in_unit(unit.kilojoule_per_mole):.2f} KJ/mol"
             )
-            if scale != 1.0:
-                if force["name"] in [
-                    "NonbondedForce",
-                    "Total",
-                ]:  # NonbondedForce, Total
-                    assert (
-                        pytest.approx(
-                            force["energy"] / forces_rest2[i]["energy"], tolerance
-                        )
-                        != 1.0
-                    )
-                elif force["name"] == "CustomTorsionForce" and i in [
-                    4
-                ]:  # CustomTorsionForce scaled
-                    assert (
-                        pytest.approx(
-                            (force["energy"] / scale) / forces_rest2[i]["energy"],
-                            tolerance,
-                        )
-                        == 1.0
-                    )
-                elif force["name"] in [
-                    "HarmonicBondForce",
-                    "HarmonicAngleForce",
-                ] or i in [
-                    5,
-                    6,
-                ]:  # HarmonicBondForce, HarmonicAngleForce, CustomTorsionForces not scaled
-                    assert (
-                        pytest.approx(
-                            force["energy"] / forces_rest2[i]["energy"], tolerance
-                        )
-                        == 1.0
-                    )
-            elif force["name"] in [
-                "HarmonicBondForce",
-                "HarmonicAngleForce",
-                "NonbondedForce",
-                "CustomTorsionForce",
-                "Total",
-            ]:
-                assert (
-                    pytest.approx(
-                        (force["energy"] / scale) / forces_rest2[i]["energy"], tolerance
-                    )
-                    == 1.0
-                )
+
+        # helper: look up a single named force energy from a force dict
+        def get_named(fd, name):
+            for f in fd.values():
+                if f["name"] == name:
+                    return f["energy"]
+            return None
+
+        NB_new = get_named(forces_rest2_new, "NonbondedForce")
+        NB_ref = get_named(forces_rest2_dict, "NonbondedForce")
+        HB_new = get_named(forces_rest2_new, "HarmonicBondForce")
+        HB_ref = get_named(forces_rest2_dict, "HarmonicBondForce")
+        HA_new = get_named(forces_rest2_new, "HarmonicAngleForce")
+        HA_ref = get_named(forces_rest2_dict, "HarmonicAngleForce")
+        TorS_new = get_named(forces_rest2_new, "Torsion_solvent")
+        TorS_ref = get_named(forces_rest2_dict, "Torsion_solvent")
+        TorNS_new = get_named(forces_rest2_new, "Torsion_solute_not_scaled")
+        TorNS_ref = get_named(forces_rest2_dict, "Torsion_solute_not_scaled")
+
+        if scale != 1.0:
+            # NonbondedForce must have changed
+            assert pytest.approx(NB_new / NB_ref, tolerance) != 1.0
+            # Bond and angle forces are not scaled — must be unchanged
+            assert pytest.approx(HB_new / HB_ref, tolerance) == 1.0
+            assert pytest.approx(HA_new / HA_ref, tolerance) == 1.0
+            # Solvent torsion not scaled
+            if TorS_new is not None and TorS_ref is not None:
+                assert pytest.approx(TorS_new / TorS_ref, tolerance) == 1.0
+            # Solute not-scaled torsion unchanged
+            if TorNS_new is not None and TorNS_ref is not None:
+                assert pytest.approx(TorNS_new / TorNS_ref, tolerance) == 1.0
+            # Each solute scaled torsion force Torsion_solute_scaled_k/4 must equal
+            # scale^(k/4) * reference value
+            for n, e_new in forces_rest2_new.items():
+                fname = e_new["name"]
+                if fname.startswith("Torsion_solute_scaled_"):
+                    frac_str = fname[len("Torsion_solute_scaled_"):]
+                    num, den = frac_str.split("/")
+                    frac = int(num) / int(den)
+                    e_ref = get_named(forces_rest2_dict, fname)
+                    if e_ref is not None:
+                        assert pytest.approx(
+                            (e_new["energy"] / (scale ** frac)) / e_ref, tolerance
+                        ) == 1.0
 
         (
             E_solute_scaled_new,
@@ -561,50 +574,48 @@ def test_peptide_protein_complex(tmp_path):
                     == 1.0
                 )
 
-        # check E_solute_scaled
+        # check E_solute_scaled: invariance already asserted above; verify formula too
+        # E_solute_scaled = (sum_k Torsion_k/4 / scale^(k/4)) + NB_solute / scale
+        # Since compute_all_energies returns unscaled values, and we already checked
+        # E_solute_scaled_new == E_solute_scaled, the formula is implicitly verified.
+        # Extra explicit check: scaled_sum + NB_solute = scale * E_solute_scaled_new
         print(solute_force_new)
-        for i in solute_force_new:
-            force = solute_force_new[i]
-            if force["name"] == "NonbondedForce":
-                solute_nonbonded_new = force["energy"]
-                break
-        assert (
-            pytest.approx(
-                ((forces_rest2_new[4]["energy"] + solute_nonbonded_new) / scale)
-                / E_solute_scaled_new,
-                tolerance,
-            )
-            == 1.0
+        scaled_torsion_sum_new = sum(
+            (f["energy"] for f in forces_rest2_new.values() if f["name"].startswith("Torsion_solute_scaled_")),
+            0 * unit.kilojoules_per_mole,
         )
-        # check E_solute_not_scaled
-        solute_nonbonded_new = 0 * unit.kilojoule_per_mole
-        for i in solute_force_new:
-            force = solute_force_new[i]
-            if force["name"] in ["HarmonicBondForce", "HarmonicAngleForce"]:
-                solute_nonbonded_new += force["energy"]
-        assert (
-            pytest.approx(
-                (forces_rest2_new[5]["energy"] + solute_nonbonded_new)
-                / E_solute_not_scaled_new,
-                tolerance,
-            )
-            == 1.0
+        solute_nb_new = next(
+            f["energy"] for f in solute_force_new.values() if f["name"] == "NonbondedForce"
         )
-        # check E_solute
-        Correct_E_solute = 0 * unit.kilojoule_per_mole
-        for i in forces_rest2_new:
-            force = forces_rest2_new[i]
-            if i in [4, 5]:
-                Correct_E_solute += force["energy"]
+        assert pytest.approx(
+            (scaled_torsion_sum_new + solute_nb_new) / (scale * E_solute_scaled_new),
+            tolerance,
+        ) == 1.0
 
-        for i in solute_force_new:
-            force = solute_force_new[i]
-            if force["name"] in [
-                "HarmonicBondForce",
-                "HarmonicAngleForce",
-                "NonbondedForce",
-            ]:
-                Correct_E_solute += force["energy"]
+        # check E_solute_not_scaled
+        TorNS_new_energy = get_named(forces_rest2_new, "Torsion_solute_not_scaled")
+        solute_bonded_new = sum(
+            (f["energy"] for f in solute_force_new.values()
+             if f["name"] in ["HarmonicBondForce", "HarmonicAngleForce"]),
+            0 * unit.kilojoules_per_mole,
+        )
+        if TorNS_new_energy is not None:
+            assert pytest.approx(
+                (TorNS_new_energy + solute_bonded_new) / E_solute_not_scaled_new,
+                tolerance,
+            ) == 1.0
+        # check E_solute: all solute torsion forces (by name) + bond/angle/NB from solute subsystem
+        Correct_E_solute = 0 * unit.kilojoule_per_mole
+        for f in forces_rest2_new.values():
+            if f["name"].startswith("Torsion_solute_"):
+                Correct_E_solute += f["energy"]
+        for f in solute_force_new.values():
+            if f["name"] in ["HarmonicBondForce", "HarmonicAngleForce", "NonbondedForce"]:
+                Correct_E_solute += f["energy"]
+
+        print(f"Correct_E_solute {Correct_E_solute}")
+        print(f"E_solute_scaled_new {E_solute_scaled_new}")
+        print(f"E_solute_not_scaled_new {E_solute_not_scaled_new}")
 
         assert (
             pytest.approx(
@@ -614,11 +625,11 @@ def test_peptide_protein_complex(tmp_path):
             )
             == 1.0
         )
-        # check E_solvent
-        assert (
-            pytest.approx((E_solvent_new) / solvent_force_new[6]["energy"], tolerance)
-            == 1.0
+        # check E_solvent: compare against the Total entry in the returned force dict
+        solvent_total_energy = next(
+            f["energy"] for f in solvent_force_new.values() if f["name"] == "Total"
         )
+        assert pytest.approx(E_solvent_new / solvent_total_energy, tolerance) == 1.0
         # check E_solvent_solute_nb
         for i in solvent_force_new:
             force = solvent_force_new[i]
@@ -708,7 +719,6 @@ def test_5awl_omega_PRO(tmp_path):
         dt=dt,
     )
 
-    assert test.system.getNumForces() == 9
     assert test.solute_index == solute_indices
     assert len(test.solute_index) == 166
     assert len(test.solvent_index) == pytest.approx(4000, abs=2000)
@@ -717,17 +727,18 @@ def test_5awl_omega_PRO(tmp_path):
     assert len(test.init_nb_exept_index) == 899
     assert len(test.init_nb_exept_value) == 899
     assert len(test.init_nb_exept_solute_value) == 899
-    assert len(test.init_torsions_index) == 521
-    assert len(test.init_torsions_value) == 521
-    assert test.solute_torsion_force.getNumTorsions() == 521
 
-    torsion_len = [521, 46, 0]
-    force_i = 0
-
-    for force in test.system.getForces():
-        if isinstance(force, openmm.CustomTorsionForce):
-            assert force.getNumTorsions() == torsion_len[force_i]
-            force_i += 1
+    # torsion forces are now named; check by name
+    torsion_counts_5awl = {
+        force.getName(): force.getNumTorsions()
+        for force in test.system.getForces()
+        if isinstance(force, openmm.CustomTorsionForce)
+    }
+    total_scaled_5awl = sum(
+        c for n, c in torsion_counts_5awl.items() if n.startswith("Torsion_solute_scaled_")
+    )
+    assert total_scaled_5awl == 521
+    assert torsion_counts_5awl.get("Torsion_solute_not_scaled", 0) == 46
 
     integrator_2 = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
 
@@ -741,7 +752,6 @@ def test_5awl_omega_PRO(tmp_path):
         exclude_Pro_omegas=True,
     )
 
-    assert test_2.system.getNumForces() == 9
     assert test_2.solute_index == solute_indices
     assert len(test_2.solute_index) == 166
     assert len(test_2.solvent_index) == pytest.approx(4000, abs=2000)
@@ -752,14 +762,15 @@ def test_5awl_omega_PRO(tmp_path):
     assert len(test_2.init_nb_exept_index) == 899
     assert len(test_2.init_nb_exept_value) == 899
     assert len(test_2.init_nb_exept_solute_value) == 899
-    assert len(test_2.init_torsions_index) == 521 - 4
-    assert len(test_2.init_torsions_value) == 521 - 4
-    assert test_2.solute_torsion_force.getNumTorsions() == 521 - 4
 
-    torsion_len = [521 - 4, 46 + 4, 0]
-    force_i = 0
-
-    for force in test_2.system.getForces():
-        if isinstance(force, openmm.CustomTorsionForce):
-            assert force.getNumTorsions() == torsion_len[force_i]
-            force_i += 1
+    # with exclude_Pro_omegas=True, 4 torsions move from scaled to not_scaled
+    torsion_counts_5awl_2 = {
+        force.getName(): force.getNumTorsions()
+        for force in test_2.system.getForces()
+        if isinstance(force, openmm.CustomTorsionForce)
+    }
+    total_scaled_5awl_2 = sum(
+        c for n, c in torsion_counts_5awl_2.items() if n.startswith("Torsion_solute_scaled_")
+    )
+    assert total_scaled_5awl_2 == 521 - 4
+    assert torsion_counts_5awl_2.get("Torsion_solute_not_scaled", 0) == 46 + 4

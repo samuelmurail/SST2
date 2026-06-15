@@ -1579,6 +1579,7 @@ class REST2:
         # ------------------------------------------------------------------ #
 
         TORSION_SCALED_PREFIX = "Torsion_solute_scaled_"
+        TORSION_NOT_SCALED = "Torsion_solute_not_scaled"
         CMAP_SOLUTE_PREFIX    = "CMAP_solute_"
 
         SYSTEM_SCALED_FULL = {
@@ -1633,6 +1634,9 @@ class REST2:
                 num, den = name[len(CMAP_SOLUTE_PREFIX):].split("/")
                 E_solute_scaled += unscale(energy, frac=int(num) / int(den))
                 E_solute_raw    += energy
+            
+            elif name == TORSION_NOT_SCALED:
+                E_solute_not_scaled += energy
 
             elif name in SYSTEM_IGNORED:
                 pass
@@ -1840,7 +1844,10 @@ def run_rest2(
 
 
 if __name__ == "__main__":
-    # Check energy decompostion is correct:
+    # Check energy decomposition is correct:
+    # Validates that compute_all_energies() correctly decomposes the system
+    # at both 300 K (lambda=1) and a target temperature (lambda<1).
+    # Uses force names (not indices) so it works across forcefields and platforms.
     import tools
 
     logger.setLevel(logging.INFO)
@@ -1851,11 +1858,20 @@ if __name__ == "__main__":
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-    # Whole system:
+    # ------------------------------------------------------------------ #
+    # Configuration — change these to test different setups               #
+    # ------------------------------------------------------------------ #
     name = "2HPL"
+    selection = "chain B"
+    selection = "(chain A and resid > 10 and resid < 21)"
     charmm_use = False
-    platform_name = "OpenCL"
+    platform_name = "OpenCL"   # OpenCL / CUDA / CPU
+    nonbondedMethod = app.PME  # app.PME or app.CutoffPeriodic
+    target_temperature = 600   # K — the REST2 "hot" replica temperature
 
+    # ------------------------------------------------------------------ #
+    # Force field                                                         #
+    # ------------------------------------------------------------------ #
     if not charmm_use:
         forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
     else:
@@ -1865,279 +1881,197 @@ if __name__ == "__main__":
     temperature = 300 * unit.kelvin
     friction = 1 / unit.picoseconds
 
-    # SYSTEM 
+    # ------------------------------------------------------------------ #
+    # Helper: sum energies from a force-dict by name                      #
+    # ------------------------------------------------------------------ #
+    def sum_by_name(force_dict, names):
+        total = 0.0 * unit.kilojoules_per_mole
+        for f in force_dict.values():
+            if f["name"] in names:
+                total += f["energy"]
+        return total
 
-    #selection = "(chain A and resid > 10 and resid < 21)"
-    selection = "chain B"
+    def ratio(a, b):
+        av = a.value_in_unit(unit.kilojoules_per_mole)
+        bv = b.value_in_unit(unit.kilojoules_per_mole)
+        return av / bv if bv != 0 else float("nan")
+
+    # ------------------------------------------------------------------ #
+    # Build solute / solvent PDB files                                    #
+    # ------------------------------------------------------------------ #
     equi_coor = pdb_numpy.Coor(f"src/SST2/tests/inputs/{name}_equi_water.pdb")
-    solute = equi_coor.select_atoms(selection)
     solute_indices = equi_coor.get_index_select(selection)
-    solute.write(f"tmp_{name}_only_pep.pdb", overwrite=True)
-    solvant = equi_coor.select_atoms(f"not ({selection})")
-    solvant.write(f"tmp_{name}_no_pep.pdb", overwrite=True)
+    equi_coor.select_atoms(selection).write(f"tmp_{name}_only_pep.pdb", overwrite=True)
+    equi_coor.select_atoms(f"not ({selection})").write(f"tmp_{name}_no_pep.pdb", overwrite=True)
 
     logger.info(f"Selected {len(solute_indices)} atoms in solute group")
-    logger.info(f"Selected {solvant.len} atoms in solvent group")
+    logger.info(f"Selected {equi_coor.len - len(solute_indices)} atoms in solvent group")
     logger.info(f"Selected {equi_coor.len} atoms in total system")
 
     pdb = app.PDBFile(f"src/SST2/tests/inputs/{name}_equi_water.pdb")
 
-    integrator = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
-
+    # ------------------------------------------------------------------ #
+    # Classic whole-system simulation (reference)                         #
+    # ------------------------------------------------------------------ #
     system = forcefield.createSystem(
         pdb.topology,
-        nonbondedMethod=app.PME,
+        nonbondedMethod=nonbondedMethod,
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
     )
-
-    print("Setting up simulation...")
-
     simulation = setup_simulation(
-        system, pdb.positions, pdb.topology, integrator, platform_name
+        system, pdb.positions, pdb.topology,
+        openmm.LangevinMiddleIntegrator(temperature, friction, dt),
+        platform_name,
     )
-
-    print("Whole system energy")
+    print("\nWhole system energy")
     tools.print_forces(system, simulation)
     forces_sys = tools.get_forces(system, simulation)
 
-    """
-    nsteps=10000
-    every_step = 500
-    set_coor_pep = False
-
-    scale = 1.0
-
-    print('Timing %d steps of integration...' % nsteps)
-    initial_time = time.time()
-    for i in range(nsteps//every_step):
-        #print('.', end='')
-        simulation.step(every_step)
-        scale *= 0.95
-        
-        #_update_custom_nonbonded(simulation, scale, solute_solvent_custom_nonbonded_force, init_nb_param)
-        
-        if set_coor_pep:
-            tot_positions = simulation.context.getState(
-                getPositions=True,
-                getEnergy=True).getPositions()
-            simulation_pep.context.setPositions(tot_positions[solute[0]:solute[-1]+1])
-            forces = get_forces(system_pep, simulation_pep)
-    print()
-    final_time = time.time()
-    elapsed_time = (final_time - initial_time) * unit.seconds
-    integrated_time = nsteps * dt
-    print(f'{nsteps} steps of {dt/unit.femtoseconds:.1f} fs timestep' +
-          f'({integrated_time/unit.picoseconds:.3f} ps) took {elapsed_time/unit.seconds:.3f}'+
-          f' s : {(integrated_time/elapsed_time)/(unit.nanoseconds/unit.day):.3f} ns/day')
-    """
-
-    # PEPTIDE system:
-
+    # ------------------------------------------------------------------ #
+    # Solute-only simulation (reference)                                  #
+    # ------------------------------------------------------------------ #
     pdb_pep = app.PDBFile(f"tmp_{name}_only_pep.pdb")
-
-    integrator_pep = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
-
     system_pep = forcefield.createSystem(
         pdb_pep.topology,
-        nonbondedMethod=app.PME,
+        nonbondedMethod=nonbondedMethod,
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
         ignoreExternalBonds=True,
     )
-
     simulation_pep = setup_simulation(
-        system_pep, pdb_pep.positions, pdb_pep.topology, integrator_pep, platform_name
+        system_pep, pdb_pep.positions, pdb_pep.topology,
+        openmm.LangevinMiddleIntegrator(temperature, friction, dt),
+        platform_name,
     )
-
-    print("Peptide forces:")
+    print("\nPeptide (solute) forces:")
     tools.print_forces(system_pep, simulation_pep)
     forces_pep = tools.get_forces(system_pep, simulation_pep)
 
-    # NO Peptide system
-
+    # ------------------------------------------------------------------ #
+    # Solvent-only simulation (reference)                                 #
+    # ------------------------------------------------------------------ #
     pdb_no_pep = app.PDBFile(f"tmp_{name}_no_pep.pdb")
-
-    integrator_no_pep = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
-
     system_no_pep = forcefield.createSystem(
         pdb_no_pep.topology,
-        nonbondedMethod=app.PME,
+        nonbondedMethod=nonbondedMethod,
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
         ignoreExternalBonds=True,
     )
-
     simulation_no_pep = setup_simulation(
-        system_no_pep,
-        pdb_no_pep.positions,
-        pdb_no_pep.topology,
-        integrator_no_pep,
+        system_no_pep, pdb_no_pep.positions, pdb_no_pep.topology,
+        openmm.LangevinMiddleIntegrator(temperature, friction, dt),
         platform_name,
     )
-
-    print("No Peptide forces:")
+    print("\nSolvent forces:")
     tools.print_forces(system_no_pep, simulation_no_pep)
     forces_no_pep = tools.get_forces(system_no_pep, simulation_no_pep)
 
+    # Reference totals from separate simulations (force-name based)
+    NB_NAMES = {"NonbondedForce"}
+    BOND_NAMES = {"HarmonicBondForce"}
+    ANGLE_NAMES = {"HarmonicAngleForce"}
+    TORSION_NAMES = {"PeriodicTorsionForce", "CustomTorsionForce", "CMAPTorsionForce"}
+
+    ref_pep_nb  = sum_by_name(forces_pep, NB_NAMES)
+    ref_sol_nb  = sum_by_name(forces_no_pep, NB_NAMES)
+    ref_sys_nb  = sum_by_name(forces_sys, NB_NAMES)
+    ref_sys_tot = sum_by_name(forces_sys, BOND_NAMES | ANGLE_NAMES | TORSION_NAMES | NB_NAMES)
+
     ####################
-    # ## REST2 test ####
+    # ## REST2 setup ###
     ####################
 
-    # Get indices of the three sets of atoms.
-    all_indices = [int(i.index) for i in pdb.topology.atoms()]
-    # solvent_indices = [
-    #     int(i.index) for i in pdb.topology.atoms() if not (i.residue.chain.id in ["B"])
-    # ]
-    # solute_indices = [
-    #     int(i.index) for i in pdb.topology.atoms() if i.residue.chain.id in ["B"]
-    # ]
-    # solute_indices = [
-    #     int(i.index)
-    #     for i in pdb.topology.atoms()
-    #     if i.residue.chain.id == "A" and i.residue.id > "10" and i.residue.id < "21"
-    # ]
-    print(solute_indices)
-    print(f" {len(solute_indices)} atom in solute group")
-
-    integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
-
-    nonbondedMethod = app.PME
-    # nonbondedMethod = app.CutoffPeriodic
+    print(f"\nSolute indices: {len(solute_indices)} atoms")
 
     test = REST2(
         system,
         pdb,
         forcefield,
         solute_indices,
-        integrator_rest,
+        openmm.LangevinMiddleIntegrator(temperature, friction, dt),
         nonbondedMethod=nonbondedMethod,
         platform_name=platform_name,
     )
 
-    logger.info("REST2 forces 300K:")
-    tools.print_forces(test.system, test.simulation)
-    forces_rest2 = tools.get_forces(test.system, test.simulation)
+    # ------------------------------------------------------------------ #
+    # Helper: print decomposition and compare with reference              #
+    # ------------------------------------------------------------------ #
+    def check_decomposition(label, scale):
+        print(f"\n{'='*60}")
+        print(f"  {label}  (lambda = {scale:.4f})")
+        print(f"{'='*60}")
 
-    (
-        E_solute_scaled,
-        E_solute_not_scaled,
-        E_solvent,
-        solvent_solute_nb,
-    ) = test.compute_all_energies()
+        tools.print_forces(test.system, test.simulation)
+        forces_rest2 = tools.get_forces(test.system, test.simulation)
 
-    print(f"E_solute_scaled      {E_solute_scaled}")
-    print(f"E_solute_not_scaled  {E_solute_not_scaled}")
-    print(f"E_solvent            {E_solvent}")
-    print(f"solvent_solute_nb    {solvent_solute_nb}")
+        (
+            E_solute_scaled,
+            E_solute_not_scaled,
+            E_solvent,
+            E_cross_nb,
+        ) = test.compute_all_energies()
 
+        print(f"\ncompute_all_energies() output (unscaled physical energies):")
+        print(f"  E_solute_scaled     = {E_solute_scaled}")
+        print(f"  E_solute_not_scaled = {E_solute_not_scaled}")
+        print(f"  E_solvent           = {E_solvent}")
+        print(f"  E_cross_nb          = {E_cross_nb}")
 
-    print("#########################\nREST2 solute forces:")
-    tools.print_forces(test.system_solute, test.simulation_solute)
-    print("#########################")
-
-    print("\nCompare not scaled energy rest2 vs. classic:\n")
-    print(
-        f"HarmonicBondForce    {forces_rest2[0]['energy']/forces_sys[0]['energy']:.5e}"
-    )
-    if charmm_use:
-        print(
-            f"HarmonicAngleForce   {forces_rest2[5]['energy']/forces_sys[7]['energy']:.5e}"
+        # Reconstructed total potential energy from decomposition:
+        # U_REST2(lambda) = lambda*E_sol_scaled + E_sol_not_scaled
+        #                   + E_solvent + sqrt(lambda)*E_cross_nb
+        E_rebuilt = (
+            scale * E_solute_scaled
+            + E_solute_not_scaled
+            + E_solvent
+            + np.sqrt(scale) * E_cross_nb
         )
-        print("Compare scaled energy:")
-        torsion_force = (
-            forces_rest2[9]["energy"]
-            + forces_rest2[10]["energy"]
-            + forces_rest2[11]["energy"]
-        )
-        print(f"PeriodicTorsionForce {torsion_force/forces_sys[1]['energy']:.5e}")
-        print(
-            f"NonbondedForce       {forces_rest2[2]['energy']/forces_sys[4]['energy']:.5e}"
-        )
-        print(
-            f"Total                {forces_rest2[14]['energy']/forces_sys[10]['energy']:.5e}"
-        )
+        # Potential energy from the simulation context
+        E_state = test.simulation.context.getState(getEnergy=True).getPotentialEnergy()
 
-        print("\nCompare torsion energy rest2 vs. pep:\n")
-        torsion_force = forces_rest2[9]["energy"] + forces_rest2[10]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_pep[1]['energy']:.5e}")
+        print(f"\nClosure check (rebuilt vs context):")
+        print(f"  E_rebuilt (from decomp) = {E_rebuilt}")
+        print(f"  E_state   (from context)= {E_state}")
+        print(f"  ratio rebuilt/state     = {ratio(E_rebuilt, E_state):.6f}  (expect 1.0)")
 
-        print("\nCompare torsion energy rest2 vs. no pep:\n")
-        torsion_force = forces_rest2[11]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[1]['energy']:.5e}")
+        # At lambda=1: decomposed energies must match separate simulations
+        if abs(scale - 1.0) < 1e-6:
+            print(f"\nCompare at lambda=1 with separate simulations:")
+            # Nonbonded cross term recovered by subtraction
+            rest2_nb = sum_by_name(forces_rest2, NB_NAMES)
+            cross_nb_from_sub = rest2_nb - ref_pep_nb - ref_sol_nb
+            print(f"  NB cross (subtraction)   = {cross_nb_from_sub}")
+            print(f"  NB cross (decomposition) = {E_cross_nb}")
+            print(f"  ratio                    = {ratio(E_cross_nb, cross_nb_from_sub):.6f}  (expect 1.0)")
 
-    else:
-        print(
-            f"HarmonicAngleForce   {forces_rest2[2]['energy']/forces_sys[2]['energy']:.5e}"
-        )
+            # Total NB should match whole system
+            rest2_total_nb = sum_by_name(forces_rest2, NB_NAMES)
+            print(f"\n  REST2 total NB = {rest2_total_nb}")
+            print(f"  System NB      = {ref_sys_nb}")
+            print(f"  ratio          = {ratio(rest2_total_nb, ref_sys_nb):.6f}  (expect 1.0)")
 
-        print("Compare scaled energy:")
-        torsion_force = (
-            forces_rest2[4]["energy"]
-            + forces_rest2[5]["energy"]
-            + forces_rest2[6]["energy"]
-        )
-        print(f"PeriodicTorsionForce {torsion_force/forces_sys[2]['energy']:.5e}")
+        print(f"\nREST2 solute forces:")
+        tools.print_forces(test.system_solute, test.simulation_solute)
 
-        print(
-            f"NonbondedForce       {forces_rest2[1]['energy']/forces_sys[1]['energy']:.5e}"
-        )
-        print(
-            f"Total                {forces_rest2[9]['energy']/forces_sys[6]['energy']:.5e}"
-        )
+    # ------------------------------------------------------------------ #
+    # Check at 300 K (lambda = 1)                                         #
+    # ------------------------------------------------------------------ #
+    check_decomposition("300 K  (lambda=1, unscaled reference)", scale=1.0)
 
-        print("\nCompare torsion energy rest2 vs. pep:\n")
-        torsion_force = forces_rest2[4]["energy"] + forces_rest2[5]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_pep[2]['energy']:.5e}")
+    # ------------------------------------------------------------------ #
+    # Time individual update calls                                         #
+    # ------------------------------------------------------------------ #
+    scale = temperature.value_in_unit(unit.kelvin) / target_temperature  # 300/600 = 0.5
 
-        print("\nCompare torsion energy rest2 vs. no pep:\n")
-        torsion_force = forces_rest2[6]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[2]['energy']:.5e}")
-
-    print("\nCompare nonbond energy rest2 vs. no pep+pep+solvent_solute_nb:\n")
-    non_bonded = (
-        solvent_solute_nb + forces_pep[1]["energy"] + forces_no_pep[1]["energy"]
-    )
-    print(f"NonbondedForce       {non_bonded/forces_sys[1]['energy']:.5e}")
-
-    solute_scaled_force = forces_rest2[4]["energy"] + forces_pep[1]["energy"]
-    print(f"E_solute_scaled      {solute_scaled_force/E_solute_scaled:.5e}")
-    solute_not_scaled_force = (
-        forces_rest2[5]["energy"] + forces_pep[0]["energy"] + forces_pep[4]["energy"]
-    )
-    print(f"E_solute_not_scaled  {solute_not_scaled_force/E_solute_not_scaled:.5e}")
-
-    if charmm_use:
-        print(f"E_solvent            {E_solvent/forces_no_pep[10]['energy']:.5e}")
-    else:
-        print(f"E_solvent            {E_solvent/forces_no_pep[6]['energy']:.5e}")
-
-    scale = 0.5
     t0 = time.time()
     test.scale_nonbonded_torsion(scale)
-    print(f"scale_nonbonded_torsion:     {1000*(time.time()-t0):.4f}ms")
+    print(f"\nscale_nonbonded_torsion:     {1000*(time.time()-t0):.4f}ms")
 
+    # Reset and time each sub-update individually
+    test.scale_nonbonded_torsion(1.0)
 
-    # def scale_nonbonded_torsion(self, scale):
-    #     """Scale solute nonbonded potential and
-    #     solute torsion potential
-    #     """
-
-    #     self.scale = scale
-    #     if self.CMAP_flag:
-    #         self.update_cmap(scale)
-    #     self.update_nonbonded(scale)
-    #     if self.reaction_field:
-    #         self.update_nonbonded_reaction_field(scale)
-    #         self.update_bonded_reaction_field(scale)
-    #     else:
-    #         self.update_nonbonded_solute(scale)
-    #     if self.NBFIX_flag:
-    #         self.update_NBFIX(scale)
-    #     self.update_torsions(scale)
-
-
-    
     t0 = time.time()
     test.update_nonbonded(scale)
     print(f"update_nonbonded:            {1000*(time.time()-t0):.4f}ms")
@@ -2149,270 +2083,45 @@ if __name__ == "__main__":
     if test.CMAP_flag:
         t0 = time.time()
         test.update_cmap(scale)
-        print(f"update_cmap:             {1000*(time.time()-t0):.4f}ms")
-    
+        print(f"update_cmap:                 {1000*(time.time()-t0):.4f}ms")
+
     if not test.reaction_field:
         t0 = time.time()
         test.update_nonbonded_solute(scale)
-        print(f"update_nonbonded_solute: {1000*(time.time()-t0):.4f}ms")
-    
+        print(f"update_nonbonded_solute:     {1000*(time.time()-t0):.4f}ms")
+
     if test.NBFIX_flag:
         t0 = time.time()
         test.update_NBFIX(scale)
-        print(f"update_NBFIX:            {1000*(time.time()-t0):.4f}ms")
-    
+        print(f"update_NBFIX:                {1000*(time.time()-t0):.4f}ms")
+
     if test.lj14_flag:
         t0 = time.time()
         test.update_lj14(scale)
-        print(f"update_lj14:             {1000*(time.time()-t0):.4f}ms")
+        print(f"update_lj14:                 {1000*(time.time()-t0):.4f}ms")
 
-    print("REST2 forces 600K:")
-    tools.print_forces(test.system, test.simulation)
+    test.scale = scale  # keep internal state consistent after manual sub-updates
 
-    print("#########################\nREST2 solute forces:")
-    tools.print_forces(test.system_solute, test.simulation_solute)
-    print("#########################")
+    # ------------------------------------------------------------------ #
+    # Check at target temperature (lambda < 1)                            #
+    # ------------------------------------------------------------------ #
+    check_decomposition(
+        f"{target_temperature} K  (lambda={scale:.4f})", scale=scale
+    )
 
-
-    forces_rest2 = tools.get_forces(test.system, test.simulation)
-    (
-        E_solute_scaled,
-        E_solute_not_scaled,
-        E_solvent,
-        solvent_solute_nb,
-    ) = test.compute_all_energies()
-
-    print(f"E_solute_scaled      {E_solute_scaled}")
-    print(f"E_solute_not_scaled  {E_solute_not_scaled}")
-    print(f"E_solvent            {E_solvent}")
-    print(f"solvent_solute_nb    {solvent_solute_nb}")
-
-    print("\nCompare not scaled energy rest2 vs. classic:\n")
-
-    if charmm_use:
-
-        print(
-            f"HarmonicBondForce    {forces_rest2[0]['energy']/forces_sys[0]['energy']:.5e}"
-        )
-        print(
-            f"HarmonicAngleForce   {forces_rest2[5]['energy']/forces_sys[7]['energy']:.5e}"
-        )
-        print("Compare scaled energy:")
-        torsion_force = (
-            forces_rest2[4]["energy"] * scale
-            + forces_rest2[5]["energy"]
-            + forces_rest2[6]["energy"]
-        )
-        print(f"PeriodicTorsionForce {torsion_force/(forces_sys[1]['energy']+forces_sys[2]['energy']):.5e}")
-        print(
-            f"NonbondedForce       {forces_rest2[2]['energy']/forces_sys[4]['energy']:.5e}"
-        )
-        print(
-            f"Total                {forces_rest2[14]['energy']/forces_sys[10]['energy']:.5e}"
-        )
-
-        print("\nCompare torsion energy rest2 vs. pep:\n")
-        torsion_force = forces_rest2[4]["energy"] + forces_rest2[5]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_pep[2]['energy']:.5e}")
-
-        print("\nCompare torsion energy rest2 vs. no pep:\n")
-        torsion_force = forces_rest2[6]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[2]['energy']:.5e}")
-
-        print("\nCompare nonbond energy rest2 vs. no pep+pep+solvent_solute_nb:\n")
-        non_bonded = (
-            solvent_solute_nb + forces_pep[1]["energy"] + forces_no_pep[1]["energy"]
-        )
-        print(f"NonbondedForce       {non_bonded/forces_sys[1]['energy']:.5e}")
-
-        solute_scaled_force = forces_rest2[4]["energy"] + forces_pep[2]["energy"]
-        print(f"E_solute_scaled      {solute_scaled_force/E_solute_scaled:.5e}")
-        solute_not_scaled_force = (
-            forces_rest2[5]["energy"] + forces_pep[0]["energy"] + +forces_pep[1]["energy"]
-        )
-        print(f"E_solute_not_scaled  {non_bonded/forces_sys[2]['energy']:.5e}")
-
-        print(f"E_solvent            {E_solvent/forces_no_pep[6]['energy']:.5e}")
-    else:
-
-        print(
-            f"HarmonicBondForce    {forces_rest2[0]['energy']/forces_sys[0]['energy']:.5e}"
-        )
-        print(
-            f"HarmonicAngleForce   {forces_rest2[3]['energy']/forces_sys[4]['energy']:.5e}"
-        )
-        print("Compare scaled energy:")
-        torsion_force = (
-            forces_rest2[4]["energy"] * scale
-            + forces_rest2[5]["energy"]
-            + forces_rest2[6]["energy"]
-        )
-        print(f"PeriodicTorsionForce {torsion_force/(forces_sys[1]['energy']+forces_sys[2]['energy']):.5e}")
-        print(
-            f"NonbondedForce       {forces_rest2[2]['energy']/forces_sys[4]['energy']:.5e}"
-        )
-        print(
-            f"Total                {forces_rest2[9]['energy']/forces_sys[6]['energy']:.5e}"
-        )
-
-        print("\nCompare torsion energy rest2 vs. pep:\n")
-        torsion_force = forces_rest2[4]["energy"] + forces_rest2[5]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_pep[2]['energy']:.5e}")
-
-        print("\nCompare torsion energy rest2 vs. no pep:\n")
-        torsion_force = forces_rest2[6]["energy"]
-        print(f"PeriodicTorsionForce {torsion_force/forces_no_pep[2]['energy']:.5e}")
-
-        print("\nCompare nonbond energy rest2 vs. no pep+pep+solvent_solute_nb:\n")
-        non_bonded = (
-            solvent_solute_nb + forces_pep[1]["energy"] + forces_no_pep[1]["energy"]
-        )
-        print(f"NonbondedForce       {non_bonded/forces_sys[1]['energy']:.5e}")
-
-        solute_scaled_force = forces_rest2[4]["energy"] + forces_pep[2]["energy"]
-        print(f"E_solute_scaled      {solute_scaled_force/E_solute_scaled:.5e}")
-        solute_not_scaled_force = (
-            forces_rest2[5]["energy"] + forces_pep[0]["energy"] + +forces_pep[1]["energy"]
-        )
-        print(f"E_solute_not_scaled  {non_bonded/forces_sys[2]['energy']:.5e}")
-
-        print(f"E_solvent            {E_solvent/forces_no_pep[6]['energy']:.5e}")
-
-    """
-    print('Timing %d steps of integration...' % nsteps)
-
-    temp_sim = 450
-
-    out_name = f'tmp/test_{temp_sim:d}K'
-    tot_steps = 500000
-    save_step_dcd = 10000
-    save_step_log = 500
-
-    scale = 300 / temp_sim
-
-    test.simulation.reporters.append(
-        DCDReporter(out_name +'_sim_temp.dcd',
-                    save_step_dcd))
-
-    test.simulation.reporters.append(
-        StateDataReporter(sys.stdout, save_step_dcd,
-                          step=True,
-                          temperature=True,
-                          speed=True,
-                          remainingTime=True,
-                          totalSteps=tot_steps))
-
-    test.simulation.reporters.append(
-        StateDataReporter(out_name +'_sim_temp.csv', 
-                          save_step_log,
-                          step=True,
-                          potentialEnergy=True,
-                          totalEnergy=True,
-                          speed=True,
-                          temperature=True))
-
-    test.simulation.reporters.append(
-        CheckpointReporter(
-            out_name +'_sim_temp.chk',
-            100000))
-
-    class Rest2Reporter(object):
-        def __init__(self, file, reportInterval, rest2):
-            self._out = open(file, 'w')
-            self._out.write("ps,Solute(kJ/mol),Solvent(kJ/mol),Solute-Solvent(kJ/mol)\n")
-            self._reportInterval = reportInterval
-            self._rest2 = rest2
-            
-        def __del__(self):
-            self._out.close()
-
-        def describeNextReport(self, simulation):
-            steps = self._reportInterval - simulation.currentStep%self._reportInterval
-            return (steps, False, False, False, False, None)
-
-        def report(self, simulation, state):
-
-            energies = self._rest2.compute_all_energies()
-
-            time = state.getTime().value_in_unit(unit.picosecond)
-            self._out.write(f'{time},{energies[0]._value},{energies[1]._value},{energies[2]._value}\n') 
-
-    test.simulation.reporters.append(
-        Rest2Reporter(
-            out_name +'_energie_sim_temp.csv',
-            500,
-            test))
-
-    # At 500K (βm/β0)
-    # T0/Tm
-
-
-    set_coor_pep = True
-    nsteps = tot_steps
-    every_step = 1000
-
-    test.scale_nonbonded_torsion(scale)
-
-    initial_time = time.time()
-    for i in range(nsteps//every_step):
-        #print('.', end='')
-        test.simulation.step(every_step)
-        
-        #_update_custom_nonbonded(simulation, scale, solute_solvent_custom_nonbonded_force, init_nb_param)
-        
-        if set_coor_pep:
-            #solute_force = test.compute_solute_energy()
-            #solvent_force = test.compute_solvent_energy()
-
-            #for i, force in solute_force.items():
-            #    if force['name'] == 'NonbondedForce':
-            #        solute_nb = force['energy']._value
-
-            #for i, force in solvent_force.items():
-            #    if force['name'] == 'NonbondedForce':
-            #        solvent_nb = force['energy']._value
-
-            #print(f"solute nonbonde = {solute_nb:>10.2f} solvent nonbonde = {solvent_nb:>10.2f}")
-
-            #test.scale_nonbonded_torsion(scale)
-            test.compute_all_energies()
-            #test.scale_nonbonded_torsion(scale)
-            #test.update_nonbonded(scale)
-            #test.update_custom_nonbonded(scale)
-            #test.update_torsions(scale)
-
-            #test.scale_nonbonded_torsion(scale)
-            #tot_positions = test.simulation.context.getState(
-            #    getPositions=True,
-            #    getEnergy=True).getPositions()
-            #simulation_pep.context.setPositions(tot_positions[solute_indices[0]:solute_indices[-1]+1])
-            #forces = get_forces(system_pep, simulation_pep)
-
-    print()
-    print(scale)
-    final_time = time.time()
-    elapsed_time = (final_time - initial_time) * unit.seconds
-    integrated_time = nsteps * dt
-    print(f'{nsteps} steps of {dt/unit.femtoseconds:.1f} fs timestep' +
-          f'({integrated_time/unit.picoseconds:.3f} ps) took {elapsed_time/unit.seconds:.3f}'+
-          f' s : {(integrated_time/elapsed_time)/(unit.nanoseconds/unit.day):.3f} ns/day')
-
-    forces_rest2 = get_forces(test.system, test.simulation)
-
-    for key, val in forces_rest2.items():
-        print(f"{key:3} {val['name']:20} {val['energy']}")
-
-
-    # Classic
-    # 10000 steps of 2.0 fs timestep(20.000 ps) took 4.925 s : 350.893 ns/day
-    # With separate Bonds, Angles, Torsions and 
-    # specific Non bonded Solvent-Solute
-    # 10000 steps of 2.0 fs timestep(20.000 ps) took 5.258 s : 328.624 ns/day
-    # With separate Bonds, Angles, Torsions and 
-    # specific Non bonded Solute-Solute and Solvent-Solute
-    # 10000 steps of 2.0 fs timestep(20.000 ps) took 5.698 s : 303.262 ns/day
-
-    """
+    # ------------------------------------------------------------------ #
+    # Round-trip: restore lambda=1, verify energies are unchanged         #
+    # ------------------------------------------------------------------ #
+    print(f"\n{'='*60}")
+    print("  Round-trip check: restore lambda=1")
+    print(f"{'='*60}")
+    test.scale_nonbonded_torsion(1.0)
+    forces_back = tools.get_forces(test.system, test.simulation)
+    nb_back  = sum_by_name(forces_back, NB_NAMES)
+    nb_orig  = sum_by_name(tools.get_forces(system, simulation), NB_NAMES)
+    print(f"  NB after round-trip = {nb_back}")
+    print(f"  NB reference (orig) = {nb_orig}")
+    print(f"  ratio               = {ratio(nb_back, nb_orig):.6f}  (expect 1.0)")
 
     """
     vmd test_2HPL/2HPL_em_water.pdb test_2HPL/2HPL_equi_water.dcd -m 2HPL.pdb
