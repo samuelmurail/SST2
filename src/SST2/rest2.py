@@ -409,8 +409,31 @@ class REST2:
         self.fractional_terms = sorted(set(self.fractional_terms))
         logger.info(f"- Fractional terms: {self.fractional_terms}")
 
-        logger.info("- REST2 object forces:")
+        print("- REST2 object forces:")
         print_forces(self.system, self.simulation)
+        print("- REST2 solute object forces:")
+        print_forces(self.system_solute, self.simulation_solute)
+        print(f"\ncompute_all_energies() output (unscaled physical energies):")
+        (
+            E_frac_dict,
+            E_solute_not_scaled,
+            E_solvent,
+            E_cross_nb,
+        ) = self.compute_all_energies()
+
+        # Sum of all fractional unscaled energies (for display)
+        E_solute_scaled_total = sum(
+            E_frac_dict.values(), 0 * unit.kilojoules_per_mole
+        )
+
+        print(f"  E_frac_dict:")
+        for frac, E_t in sorted(E_frac_dict.items()):
+            print(f"    frac={frac:.4f}  E_t = {E_t}")
+        print(f"  E_solute_scaled_total = {E_solute_scaled_total}  (sum of fractions)")
+        print(f"  E_solute_not_scaled   = {E_solute_not_scaled}")
+        print(f"  E_solvent             = {E_solvent}")
+        print(f"  E_cross_nb            = {E_cross_nb}")
+
 
     def add_scale_NBFIX(self, NBFIX_force, solute_index):
         """Extract initial solute Lennard-Jones indexes and values (sigma, epsilon).
@@ -479,7 +502,7 @@ class REST2:
                     lj14_index = count
                     break
         old_expr = lj14_force.getEnergyFunction()
-        print(f"Old LJ14 energy function: {old_expr}")
+        logger.info(f"Old LJ14 energy function: {old_expr}")
   
         if 'epsilon' not in lj14_force.getEnergyFunction():
             logger.error("CustomBondForce does not seem to be a Lennard-Jones 1-4 force, no epsilon found in the energy function.")
@@ -494,8 +517,8 @@ class REST2:
         # Solvent (unscaled)
         lj14_solvent = openmm.CustomBondForce(energy_expression)
         lj14_solvent.setName("LJ14_solvent")
-        lj14_solvent.addPerBondParameter("epsilon")
         lj14_solvent.addPerBondParameter("sigma")
+        lj14_solvent.addPerBondParameter("epsilon")
 
         # Boundary: 1 solute atom, epsilon scaled by sqrt(lambda)
         lj14_boundary = openmm.CustomBondForce(
@@ -503,8 +526,8 @@ class REST2:
         )
         lj14_boundary.setName("LJ14_solute_boundary")
         lj14_boundary.addGlobalParameter("lambda_lj14_12", 1.0)
-        lj14_boundary.addPerBondParameter("epsilon")
         lj14_boundary.addPerBondParameter("sigma")
+        lj14_boundary.addPerBondParameter("epsilon")
 
         # Solute-solute: both atoms in solute, epsilon scaled by lambda
         lj14_solute = openmm.CustomBondForce(
@@ -512,26 +535,49 @@ class REST2:
         )
         lj14_solute.setName("LJ14_solute_solute")
         lj14_solute.addGlobalParameter("lambda_lj14_22", 1.0)
-        lj14_solute.addPerBondParameter("epsilon")
         lj14_solute.addPerBondParameter("sigma")
+        lj14_solute.addPerBondParameter("epsilon")
 
         # Distribute bonds
         for i in range(lj14_force.getNumBonds()):
-            p1, p2, (epsilon, sigma) = lj14_force.getBondParameters(i)
+            p1, p2, (sigma, epsilon) = lj14_force.getBondParameters(i)
 
             solute_num_atom = (p1 in solute_index) + (p2 in solute_index)
 
+            # logger.info(f"Bond {i}: p1={p1}, p2={p2}, epsilon={epsilon:.3f}, sigma={sigma:.3f} -> solute_num_atom={solute_num_atom}")
+            # logger.info(f"  [{i}] {lj14_force.getPerBondParameterName(i)}")
+
             if solute_num_atom == 2:
-                lj14_solute.addBond(p1, p2, [epsilon, sigma])
+                lj14_solute.addBond(p1, p2, [sigma, epsilon])
             elif solute_num_atom == 1:
-                lj14_boundary.addBond(p1, p2, [epsilon, sigma])
+                lj14_boundary.addBond(p1, p2, [sigma, epsilon])
             else:
-                lj14_solvent.addBond(p1, p2, [epsilon, sigma])
+                lj14_solvent.addBond(p1, p2, [sigma, epsilon])
+
+        # # Verify parameter order in original force
+        # logger.info("LJ14 per-bond parameter order:")
+        # for i in range(lj14_force.getNumPerBondParameters()):
+        #     logger.info(f"  [{i}] {lj14_force.getPerBondParameterName(i)}")
+        # # Print first bond as sanity check
+        # if lj14_force.getNumBonds() > 0:
+        #     p1, p2, params = lj14_force.getBondParameters(0)
+        #     logger.info(f"First bond: p1={p1}, p2={p2}, params={params}")
+        # if lj14_solvent.getNumBonds() > 0:
+        #     p1, p2, params = lj14_solvent.getBondParameters(0)
+        #     logger.info(f"First bond: p1={p1}, p2={p2}, params={params}")
+        # if lj14_boundary.getNumBonds() > 0:
+        #     p1, p2, params = lj14_boundary.getBondParameters(0)
+        #     logger.info(f"First bond: p1={p1}, p2={p2}, params={params}")
+        # if lj14_solute.getNumBonds() > 0:
+        #     p1, p2, params = lj14_solute.getBondParameters(0)
+        #     logger.info(f"First bond: p1={p1}, p2={p2}, params={params}")
 
         # Store references
         self.lj14_solvent = lj14_solvent
         self.lj14_boundary = lj14_boundary
         self.lj14_solute = lj14_solute
+        self.lj14_boundary_flag = False
+        self.lj14_solute_flag = False
 
         logger.info("- Add new LJ14 Forces")
         if lj14_solvent.getNumBonds() > 0:
@@ -545,12 +591,14 @@ class REST2:
                 f"  Adding LJ14_solute_boundary "
                 f"({lj14_boundary.getNumBonds()} bonds)"
             )
+            self.lj14_boundary_flag = True
             system.addForce(lj14_boundary)
         if lj14_solute.getNumBonds() > 0:
             logger.info(
                 f"  Adding LJ14_solute_solute "
                 f"({lj14_solute.getNumBonds()} bonds)"
             )
+            self.lj14_solute_flag = True
             system.addForce(lj14_solute)
 
         logger.info("- Delete original LJ14 Force")
@@ -1344,8 +1392,10 @@ class REST2:
 
     def update_lj14(self, scale):
         """Scale system 1-4 LJ interaction:"""
-        self.simulation.context.setParameter("lambda_lj14_12", scale ** 0.5)
-        self.simulation.context.setParameter("lambda_lj14_22", scale)
+        if self.lj14_boundary_flag:
+            self.simulation.context.setParameter("lambda_lj14_12", scale ** 0.5)
+        if self.lj14_solute_flag:
+            self.simulation.context.setParameter("lambda_lj14_22", scale)
         # self.simulation_solute.context.setParameter("lambda_lj14_22", scale)
 
     def update_nonbonded_reaction_field(self, scale):
@@ -1503,7 +1553,10 @@ class REST2:
         # 1. Solute system                                                    #
         # ------------------------------------------------------------------ #
 
-        SOLUTE_NB_SCALED = {"NonbondedForce"}
+        SOLUTE_NB_SCALED = {
+            "NonbondedForce",
+            "LennardJones"
+        }
         SOLUTE_NB_RAW    = {"LennardJones14"}
         SOLUTE_NOT_SCALED = {
             "HarmonicBondForce",
@@ -1557,7 +1610,9 @@ class REST2:
             "NonbondedForce",
             "PeriodicTorsionForce",
         }
-        SOLVENT_NB = {"NonbondedForce"}
+        SOLVENT_NB = {
+            "NonbondedForce",
+            "LennardJones"}
 
         E_solvent  = 0 * unit.kilojoules_per_mole
         solvent_nb = 0 * unit.kilojoules_per_mole
@@ -1580,7 +1635,10 @@ class REST2:
         TORSION_SCALED_PREFIX = "Torsion_solute_scaled_"
         CMAP_SOLUTE_PREFIX    = "CMAP_solute_"
 
-        SYSTEM_NB = {"NonbondedForce"}
+        SYSTEM_NB = {
+            "NonbondedForce",
+            "LennardJones"
+        }
 
         SYSTEM_IGNORED = {
             "CMMotionRemover",
@@ -1849,7 +1907,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------ #
     name = "2HPL"
     selection = "chain B"
-    selection = "(chain A and resid > 10 and resid < 21)"
+    # selection = "(chain A and resid > 10 and resid < 21)"
     charmm_use = True
     platform_name = "OpenCL"   # OpenCL / CUDA / CPU
     nonbondedMethod = app.PME  # app.PME or app.CutoffPeriodic

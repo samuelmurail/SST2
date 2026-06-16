@@ -18,49 +18,37 @@ from scipy.ndimage import gaussian_filter1d
 # Logging
 logger = logging.getLogger(__name__)
 
-
 def read_SST2_data(
     generic_name, dt=0.004, full_sep=",", save_step_dcd=100000, lambda_T_ref=300.0
 ):
-    """
-    Read the sst2 data from the csv files.
-    The data may be splited in several files if simulation
-    had to restart. The function merge all the files
-    in one dataframe.
+    """Read the SST2 data from the csv files.
+
+    Supports both the new per-fraction format:
+        Step, Aim Temp (K), E frac 0.25 (kJ/mole), ..., E solute not scaled (kJ/mole), ...
+    and the legacy single-column format:
+        Step, Aim Temp (K), E solute scaled (kJ/mole), ...
 
     Parameters
     ----------
     generic_name : str
         Generic name of the csv files (without the `.csv` extension).
     dt : float, optional
-        Time step in ps of the simulation. The default is 0.004 ps.
+        Time step in ps. Default is 0.004 ps.
     full_sep : str, optional
-        Separator used in the full csv file. The default is ",".
+        Separator used in the full csv file. Default is ",".
     save_step_dcd : int, optional
-        Step number used in the dcd file. The default is 100000.
+        Step number used in the dcd file. Default is 100000.
     lambda_T_ref : float, optional
-        Reference temperature for the lambda. The default is None.
+        Reference temperature for lambda. Default is 300.0.
 
     Returns
     -------
     df_all : pandas.DataFrame
         Dataframe with all the data.
-
     """
-
-    fields = [
-        "Step",
-        "Aim Temp (K)",
-        "E solute scaled (kJ/mole)",
-        "E solute not scaled (kJ/mole)",
-        "E solvent (kJ/mole)",
-        "E solvent-solute (kJ/mole)",
-    ]
-
     return read_ST_data(
         generic_name=generic_name,
         dt=dt,
-        fields=fields,
         full_sep=full_sep,
         save_step_dcd=save_step_dcd,
         lambda_T_ref=lambda_T_ref,
@@ -70,158 +58,166 @@ def read_SST2_data(
 def read_ST_data(
     generic_name,
     dt=0.004,
-    fields=[
-        "Steps",
-        "Aim Temp (K)",
-        "E solute scaled (kJ/mole)",
-        "E solute not scaled (kJ/mole)",
-        "E solvent (kJ/mole)",
-        "E solvent-solute (kJ/mole)",
-    ],
+    fields=None,
     full_sep=",",
     save_step_dcd=100000,
     lambda_T_ref=None,
 ):
-    """
+    """Read SST2/ST data from csv files, merging restart parts if present.
 
-    Read the sst2 data from the csv files.
-    The data may be splited in several files if simulation
-    had to restart. The function merge all the files
-    in one dataframe.
+    Supports both the new per-fraction format and the legacy single-column
+    format. If `fields` is None, all columns are read.
 
     Parameters
     ----------
     generic_name : str
         Generic name of the csv files (without the `.csv` extension).
     dt : float, optional
-        Time step in ps of the simulation. The default is 0.004 ps.
-    fields : list, optional
-        List of the fields to read in the csv files. The default is [
-        "Steps",
-        "Aim Temp (K)",
-        "E solute scaled (kJ/mole)",
-        "E solute not scaled (kJ/mole)",
-        "E solvent (kJ/mole)",
-        "E solvent-solute (kJ/mole)",
-        ].
+        Time step in ps. Default is 0.004 ps.
+    fields : list or None, optional
+        List of columns to read. If None, all columns are read.
+        Default is None.
     full_sep : str, optional
-        Separator used in the full csv file. The default is ",".
+        Separator used in the full csv file. Default is ",".
     save_step_dcd : int, optional
-        Step number used in the dcd file. The default is 100000.
-    lambda_T_ref : float, optional
-        Reference temperature for the lambda. The default is None.
+        Step number used in the dcd file. Default is 100000.
+    lambda_T_ref : float or None, optional
+        Reference temperature for lambda. Default is None.
+
+    Returns
+    -------
+    df_all : pandas.DataFrame
+        Dataframe with all the data.
     """
 
-    # Get part number
+    def read_full(path):
+        """Read full csv, selecting fields if specified."""
+        if fields is not None:
+            # Only load columns that actually exist in the file
+            available = pd.read_csv(path, sep=full_sep, nrows=0).columns.tolist()
+            cols = [f for f in fields if f in available]
+            return pd.read_csv(path, sep=full_sep, usecols=cols)
+        return pd.read_csv(path, sep=full_sep)
+
+    # ------------------------------------------------------------------ #
+    # Discover restart parts                                               #
+    # ------------------------------------------------------------------ #
     part = 1
     while os.path.isfile(f"{generic_name}_part_{part + 1}.csv"):
         part += 1
-    logger.info(f"There is {part} .csv parts to read.")
+    logger.info(f"Found {part} csv part(s) to read.")
 
-    logger.info(f"Reading part 1")
-    df_temp = pd.read_csv(f"{generic_name}_full.csv", usecols=fields, sep=full_sep)
-    df_sim = pd.read_csv(f"{generic_name}.csv")
+    # ------------------------------------------------------------------ #
+    # Load part 1                                                          #
+    # ------------------------------------------------------------------ #
+    logger.info("Reading part 1")
+    df_temp_list = [read_full(f"{generic_name}_full.csv")]
+    df_sim_list  = [pd.read_csv(f"{generic_name}.csv")]
 
-    df_temp_list = [df_temp]
-    df_sim_list = [df_sim]
-
+    # ------------------------------------------------------------------ #
+    # Load remaining parts                                                 #
+    # ------------------------------------------------------------------ #
     for i in range(2, part + 1):
-
-        last_old_step = df_temp_list[-1].iloc[df_temp_list[-1].index[-1], 0]
-
         logger.info(f"Reading part {i}")
-        df_sim_part = pd.read_csv(f"{generic_name}_part_{i}.csv")
-        df_temp_part = pd.read_csv(
-            f"{generic_name}_full_part_{i}.csv", usecols=fields, sep=full_sep
-        )
 
-        # Read step
+        df_temp_part = read_full(f"{generic_name}_full_part_{i}.csv")
+        df_sim_part  = pd.read_csv(f"{generic_name}_part_{i}.csv")
+
+        # Detect step-reset restarts (DCD format limitation)
+        last_old_step  = df_temp_list[-1].iloc[-1, 0]
         first_new_step = df_temp_part.iloc[0, 0]
 
-        logger.info(f"First step is {first_new_step}")
-
-        # The dcd format has some limitation in the number of step
-        # In some case a simulation restart has to define step number at 0
-        # To avoid issues with the dcd. The last step has to be actualize
-        # as function of the last simulation.
         if first_new_step < last_old_step - save_step_dcd:
+            step_col = df_temp_part.columns[0]
+            sim_step_col = (
+                '#"Step"' if '#"Step"' in df_sim_part.columns else "Step"
+            )
             chk_step = (
-                df_sim_list[-1]['#"Step"'][
-                    df_sim_list[-1]['#"Step"'] % save_step_dcd == 0
+                df_sim_list[-1][sim_step_col][
+                    df_sim_list[-1][sim_step_col] % save_step_dcd == 0
                 ].iloc[-1]
                 - first_new_step
             )
-            df_temp_part[fields[0]] += chk_step
-            df_sim_part['#"Step"'] += chk_step
-            logger.info(f"add {chk_step} to {generic_name}_full_part_{i}.csv")
+            df_temp_part[step_col]    += chk_step
+            df_sim_part[sim_step_col] += chk_step
+            logger.info(
+                f"Step offset of {chk_step} applied to part {i}"
+            )
 
-        df_sim_list.append(df_sim_part)
         df_temp_list.append(df_temp_part)
+        df_sim_list.append(df_sim_part)
 
-    df_sim = pd.concat(df_sim_list, axis=0, join="outer", ignore_index=True)
+    # ------------------------------------------------------------------ #
+    # Concatenate all parts                                                #
+    # ------------------------------------------------------------------ #
     df_temp = pd.concat(df_temp_list, axis=0, join="outer", ignore_index=True)
+    df_sim  = pd.concat(df_sim_list,  axis=0, join="outer", ignore_index=True)
+    del df_temp_list, df_sim_list
 
-    logger.info("Delete DataFrame part from memory")
-    for df_sim_part in df_sim_list:
-        del df_sim_part
+    logger.info(f"df_sim  length: {len(df_sim)}")
+    logger.info(f"df_temp length: {len(df_temp)}")
 
-    for df_temp_part in df_temp_list:
-        del df_temp_part
+    # ------------------------------------------------------------------ #
+    # Normalize column names (legacy ST format compatibility)              #
+    # ------------------------------------------------------------------ #
+    df_temp = df_temp.rename(columns={
+        '#"Steps"': "Step",
+        "Temperature (K)": "Aim Temp (K)",
+    })
+    df_sim = df_sim.rename(columns={'#"Step"': "Step"})
 
-    logger.info(f"sim.csv  length : {len(df_sim)}")
-    logger.info(f"temp.csv length : {len(df_temp)}")
-
-    if '#"Steps"' in df_temp.columns:
-        logger.info("Rename columns df_temp")
+    # ------------------------------------------------------------------ #
+    # Legacy format: rename single scaled column to frac 1.0              #
+    # ------------------------------------------------------------------ #
+    if "E solute scaled (kJ/mole)" in df_temp.columns:
+        logger.info(
+            "Legacy format detected: renaming "
+            "'E solute scaled (kJ/mole)' → 'E frac 1.0 (kJ/mole)'"
+        )
         df_temp = df_temp.rename(
-            columns={'#"Steps"': "Step", "Temperature (K)": "Aim Temp (K)"}
+            columns={"E solute scaled (kJ/mole)": "E frac 1.0 (kJ/mole)"}
         )
 
-    if '#"Step"' in df_sim.columns:
-        logger.info("Rename columns df_sim")
-        df_sim = df_sim.rename(columns={'#"Step"': "Step"})
-
-    max_step = min([len(df_sim), len(df_temp)])
-    logger.info(f"Using a length of : {max_step}")
-
-    df_sim = df_sim.iloc[:max_step]
+    # ------------------------------------------------------------------ #
+    # Align lengths                                                        #
+    # ------------------------------------------------------------------ #
+    max_step = min(len(df_sim), len(df_temp))
+    logger.info(f"Using length: {max_step}")
+    df_sim  = df_sim.iloc[:max_step]
     df_temp = df_temp.iloc[:max_step]
 
+    # Drop Step from df_temp before merge (it comes from df_sim)
     if "Step" in df_temp.columns:
-        df_temp = df_temp.drop(["Step"], axis=1)
+        df_temp = df_temp.drop(columns=["Step"])
 
-    # Concat both dataframe
-    logger.info(f"Concat both dataframe")
+    # ------------------------------------------------------------------ #
+    # Merge sim + temp dataframes                                          #
+    # ------------------------------------------------------------------ #
     df_all = pd.concat([df_temp, df_sim], axis=1)
-    # df_all = pd.merge(df_temp, df_sim, on="Step", how="outer")
     del df_temp, df_sim
 
-    # Add time column
-    logger.info(f"Add time column")
+    # ------------------------------------------------------------------ #
+    # Add derived columns                                                  #
+    # ------------------------------------------------------------------ #
     df_all[r"$Time\;(\mu s)$"] = df_all["Step"] * dt / 1e6
 
-    # Add a categorical column for temp
-    logger.info(f"Set Temp column to a categorical one")
     df_all["Temp (K)"] = pd.Categorical(df_all["Aim Temp (K)"])
 
-    # Add lambda column:
-    logger.info(f"Add lambda column")
     if lambda_T_ref is not None:
         df_all["lambda"] = lambda_T_ref / df_all["Aim Temp (K)"]
-
-        df_all[r"$\lambda$"] = pd.Series(df_all["lambda"].round(2), dtype="category")
-        # inverse category order, to have higher lambda at the top
+        df_all[r"$\lambda$"] = pd.Categorical(
+            df_all["lambda"].round(2)
+        )
         df_all[r"$\lambda$"] = df_all[r"$\lambda$"].cat.reorder_categories(
             df_all[r"$\lambda$"].cat.categories[::-1]
         )
-    # Remove Nan rows (rare cases of crashes)
+
+    # Drop NaN rows from rare crashes
     if df_all["Step"].isna().any():
-        logger.info(f"Remove Nan rows")
+        logger.info("Removing NaN rows")
         df_all = df_all.dropna()
-    # df_all = df_all[df_all["Step"].notna()]
 
     return df_all
-
 
 def compute_exchange_prob(
     df, temp_col="Aim Temp (K)", time_ax_name=r"$Time\;(\mu s)$", exchange_time=2
@@ -1287,7 +1283,13 @@ def plot_folding_fraction_RMSD(
 ):
 
     time_list, RMSD_list = compute_folding_fraction_RMSD(
-        df, col, cutoff, start_time, time_ax_name, ref_fold_frac, time_interval
+        df=df,
+        col=col,
+        cutoff=cutoff,
+        start_time=start_time,
+        time_ax_name=time_ax_name,
+        ref_fold_frac=ref_fold_frac,
+        time_interval=time_interval
     )
 
     if color is None:

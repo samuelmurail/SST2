@@ -88,6 +88,7 @@ def get_forcefield(forcefield_name, water_model):
             "base": ["charmm36.xml"],
             "water": {
                 "tip3": "charmm36/water.xml",
+                "tip3p": "charmm36/water.xml",
                 "spce": "charmm36/spce.xml",
                 "tip3p-pme-b": "charmm36/tip3p-pme-b.xml",
                 "tip3p-pme-f": "charmm36/tip3p-pme-f.xml",
