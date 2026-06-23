@@ -334,7 +334,7 @@ def compute_exchange_prob(
 
 
 def plot_lineplot_avg(
-    df, x, y, quant=None, color="black", max_data=50000, avg_win=1000
+    df, x, y, quant=None, color="black", max_data=50000, avg_win=1000, alpha=0.3
 ):
     """
     Plot a lineplot with a gaussian filter on the y axis.
@@ -366,7 +366,7 @@ def plot_lineplot_avg(
 
     local_df["avg"] = gaussian_filter1d(local_df[y], avg_win)
 
-    g = sns.lineplot(data=local_df, x=x, y=y, lw=0.1, color=color, alpha=0.3)
+    g = sns.lineplot(data=local_df, x=x, y=y, lw=0.1, color=color, alpha=alpha)
     sns.lineplot(data=local_df, x=x, y="avg", lw=2, color=color)
     if quant is not None:
         x_min, x_max = get_quant_min_max(local_df[x], quant)
