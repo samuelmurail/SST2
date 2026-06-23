@@ -98,6 +98,21 @@ def get_forcefield(forcefield_name, water_model):
                 "tip5pew": "charmm36/tip5pew.xml",
             },
         },
+        "charmm36m": {
+            "base": ["charmm/charmm36.xml"],
+            "water": {
+                "tip3": "charmm/waters_ions_default.xml",
+                "tip3p": "charmm/waters_ions_default.xml",
+                "spce": "charmm/waters_ions_spc_e.xml",
+                "tip3p-pme-b": "charmm/waters_ions_tip3p_pme_b.xml",
+                "tip3p-pme-f": "charmm/waters_ions_tip3p_pme_f.xml",
+                "tip4p2005": "charmm/waters_ions_tip4p_2005.xml",
+                "tip4pew": "charmm/waters_ions_tip4p_ew.xml",
+                "tip5p": "charmm/waters_ions_tip5p.xml",
+                "tip5pew": "charmm/waters_ions_tip5p_ew.xml",
+            },
+        },
+
     }
 
     try:
