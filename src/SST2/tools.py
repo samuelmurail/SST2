@@ -99,7 +99,7 @@ def get_forcefield(forcefield_name, water_model):
             },
         },
         "charmm36m": {
-            "base": ["charmm/charmm36.xml"],
+            "base": ["charmm/charmm36_nowaters.xml"],
             "water": {
                 "tip3": "charmm/waters_ions_default.xml",
                 "tip3p": "charmm/waters_ions_default.xml",

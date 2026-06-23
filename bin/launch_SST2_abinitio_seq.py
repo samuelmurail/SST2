@@ -261,7 +261,7 @@ if __name__ == "__main__":
         forcefield_files = ["charmm36.xml", "implicit/obc1.xml"]
         impl_forcefield = ForceField(*forcefield_files)
     elif args.ff == "charmm36m":
-        forcefield_files = ["charmm/charmm36.xml", "implicit/obc1.xml"]
+        forcefield_files = ["charmm/charmm36_nowaters.xml", "implicit/obc1.xml"]
         impl_forcefield = ForceField(*forcefield_files)
     else:
         raise ValueError(f"Force field {args.ff} not recognized")
