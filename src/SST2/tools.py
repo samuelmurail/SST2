@@ -503,17 +503,69 @@ def create_system_simulation(
     )
 
     simulation = setup_simulation(
-        system, pdb.positions, pdb.topology, integrator, platform_name
+        system=system,
+        position=pdb.positions,
+        topology=pdb.topology,
+        integrator=integrator,
+        temperature=temperature,
+        platform_name=platform_name
     )
+
+
 
     return system, simulation
 
 
-def create_sim_system(cif, forcefield, temp=300.0, h_mass=1.5, base_force_group=1, rigidWater = True, constraints = app.HBonds):
-    # System Configuration
+def create_sim_system(
+        cif,
+        forcefield,
+        temp=300.0,
+        h_mass=1.5,
+        base_force_group=1,
+        rigidWater = True,
+        constraints = app.HBonds,
+        nonbondedMethod = app.PME,
+        ewaldErrorTolerance = 0.0005,
+        nonbondedCutoff = 1.0 * unit.nanometers,
+        pressure = 1.0 * unit.atmospheres,
+        barostatInterval = 25,
+):
+    """
+    Create a system object from a cif file and a forcefield
+    
+    Parameters
+    ----------
+    cif : openmm.app.PDBxFile
+        CIF file object
+    forcefield : openmm.ForceField
+        Force field object
+    temp : float
+        Temperature in Kelvin
+    h_mass : float
+        Hydrogen mass in amu
+    base_force_group : int
+        Base force group
+    rigidWater : bool
+        Rigid water flag
+    constraints : openmm.app.Constraint
+        Constraints
+    nonbondedMethod : openmm.app.NonbondedMethod
+        Nonbonded method
+    ewaldErrorTolerance : float
+        Ewald error tolerance
+    nonbondedCutoff : float
+        Nonbonded cutoff in nanometers
+    pressure : float
+        Pressure in atmospheres
+    barostatInterval : int
+        Barostat interval in steps
 
-    nonbondedMethod = app.PME
-    ewaldErrorTolerance = 0.0005
+    Returns
+    -------
+    system : openmm.System
+        System object
+    """
+
     
 
     if unit.is_quantity(h_mass):
@@ -521,7 +573,6 @@ def create_sim_system(cif, forcefield, temp=300.0, h_mass=1.5, base_force_group=
     else:
         hydrogenMass = h_mass * unit.amu
 
-    nonbondedCutoff = 1.0 * unit.nanometers
 
     # Integration Options
 
@@ -529,13 +580,10 @@ def create_sim_system(cif, forcefield, temp=300.0, h_mass=1.5, base_force_group=
         temperature = temp.value_in_unit(unit.kelvin)
     else:
         temperature = temp * unit.kelvin
-    pressure = 1.0 * unit.atmospheres
-    barostatInterval = 25
 
     # Prepare the Simulation
 
     topology = cif.topology
-    positions = cif.positions
 
     system = forcefield.createSystem(
         topology,
@@ -546,7 +594,12 @@ def create_sim_system(cif, forcefield, temp=300.0, h_mass=1.5, base_force_group=
         ewaldErrorTolerance=ewaldErrorTolerance,
         hydrogenMass=hydrogenMass,
     )
-    system.addForce(openmm.MonteCarloBarostat(pressure, temperature, barostatInterval))
+    if pressure is not None:
+        if unit.is_quantity(pressure):
+            pressure = pressure.in_units_of(unit.atmospheres)
+        else:
+            pressure = pressure * unit.atmospheres
+        system.addForce(openmm.MonteCarloBarostat(pressure, temperature, barostatInterval))
 
     for force in system.getForces():
         force.setForceGroup(base_force_group)
@@ -607,7 +660,14 @@ def minimize(simulation, out_cif, topology, maxIterations=10000, overwrite=False
     )
 
 
-def setup_simulation(system, position, topology, integrator, platform_name="CUDA"):
+def setup_simulation(
+        system,
+        position,
+        topology,
+        integrator,
+        temperature,
+        platform_name="CUDA"
+):
     """Creates a simulation object
 
     Parameters
@@ -620,6 +680,8 @@ def setup_simulation(system, position, topology, integrator, platform_name="CUDA
         Topology object
     integrator : openmm.Integrator
         Integrator object
+    temperature : unit.Quantity
+        Temperature
     platform_name : str
         Platform name, default is CUDA
 
@@ -640,7 +702,7 @@ def setup_simulation(system, position, topology, integrator, platform_name="CUDA
     simulation = app.Simulation(topology, system, integrator, platform, prop)
     simulation.context.setPositions(position)
 
-    simulation.context.setVelocitiesToTemperature(300 * unit.kelvin)
+    simulation.context.setVelocitiesToTemperature(temperature)
     logger.info("Created simulation")
 
     return simulation

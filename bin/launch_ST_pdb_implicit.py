@@ -7,7 +7,7 @@ import logging
 import pandas as pd
 
 from openmm.app import PDBFile, PDBxFile, ForceField, Simulation
-from openmm import LangevinMiddleIntegrator, unit, Platform
+from openmm import LangevinMiddleIntegrator, unit, Platform, app
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src/")))
 
@@ -53,26 +53,10 @@ def parser_input():
         required=True,
     )
     parser.add_argument(
-        "-pad",
+        "-eq_time",
         action="store",
-        dest="pad",
-        help="Box padding, default=1.5 nm",
-        type=float,
-        default=1.5,
-    )
-    parser.add_argument(
-        "-vec",
-        action="store",
-        dest="vec",
-        help="Box size of one vector, provide only one value, default=None",
-        type=float,
-        default=None,
-    )
-    parser.add_argument(
-        "-eq_time_expl",
-        action="store",
-        dest="eq_time_expl",
-        help="Explicit Solvent Equilibration time, default=10 (ns)",
+        dest="eq_time",
+        help="Implicit Solvent Equilibration time, default=10 (ns)",
         type=float,
         default=10,
     )
@@ -145,16 +129,16 @@ def parser_input():
         "-friction",
         action="store",
         dest="friction",
-        help="Langevin Integrator friction coefficient default=10.0 (ps-1)",
+        help="Langevin Integrator friction coefficient default=1.0 (ps-1)",
         type=float,
-        default=10.0,
+        default=1.0,
     )
     parser.add_argument(
         "-ff",
         action="store",
         dest="ff",
-        help="force field, default=amber14",
-        default="amber14sb",
+        help="force field (amber99sbnmr, charmm36, GB99dms), default=amber99sbnmr",
+        default="amber99sbnmr",
     )
     parser.add_argument(
         "-water_ff",
@@ -184,39 +168,25 @@ if __name__ == "__main__":
     if not os.path.exists(OUT_PATH):
         os.makedirs(OUT_PATH)
 
-    tools.prepare_pdb(args.pdb, f"{OUT_PATH}/{name}_fixed.cif", pH=7.0, overwrite=False)
-
-    # forcefield_files = ['amber14/protein.ff14SB.xml', 'amber14/tip3p.xml']
-    # forcefield = ForceField(*forcefield_files)
-    forcefield = tools.get_forcefield(args.ff, args.water_ff)
-
-    if args.water_ff in ["opc3", "tip3pfb", "tip3p", "spce"]:
-        model = "tip3p"
-    elif args.water_ff in ["opc", "tip4pew", "tip4pfb"]:
-        model = 'tip4pew'
-    else:
-        logger.warning(f"Water model {args.water_ff} not recognized, using tip3pfb")
-        model = "tip3p"
-
-
-    if args.vec is not None:
-        logger.info(f"Using box vector {args.vec} nm, pad value will be ignored.")
-        box_size = args.vec
-        pad = None
-    else:
-        box_size = None
-        pad = args.pad
-
-    tools.create_water_box(
+    tools.prepare_pdb(
+        args.pdb,
         f"{OUT_PATH}/{name}_fixed.cif",
-        f"{OUT_PATH}/{name}_water.cif",
-        pad=pad,
-        vec=box_size,
-        model=model,
-        forcefield=forcefield,
-        overwrite=False,
+        pH=7.0,
+        overwrite=False
     )
 
+    if args.ff == "amber99sbnmr":
+        forcefield_files = ["amber99sbnmr.xml", "amber99_obc.xml"]
+        forcefield = ForceField(*forcefield_files)
+    elif args.ff == "charmm36":
+        forcefield_files = ["charmm36.xml", "implicit/obc1.xml"]
+        forcefield = ForceField(*forcefield_files)
+    elif args.ff == "GB99dms":
+        # https://github.com/greener-group/GB99dms/blob/main/GB99dms.xml
+        forcefield_files = ["GB99dms.xml"]
+        forcefield = ForceField(*forcefield_files)
+    else:
+        raise ValueError(f"Force field {args.ff} not recognized")
 
     ###########################
     ### BASIC EQUILIBRATION ###
@@ -224,16 +194,13 @@ if __name__ == "__main__":
 
     dt = 4 * unit.femtosecond
     temperature = args.min_temp * unit.kelvin
+    friction = args.friction / unit.picosecond
     max_temp = args.last_temp * unit.kelvin
-    friction = args.friction / unit.picoseconds
     hydrogenMass = args.hmr * unit.amu
-    rigidWater = True
-    ewaldErrorTolerance = 0.0005
-    nsteps = int(np.ceil(args.eq_time_expl * unit.nanoseconds / dt))
 
-    cif = PDBxFile(f"{OUT_PATH}/{name}_water.cif")
+    cif = PDBxFile(f"{OUT_PATH}/{name}_fixed.cif")
     PDBFile.writeFile(
-        cif.topology, cif.positions, open(f"{OUT_PATH}/{name}_water.pdb", "w"), True
+        cif.topology, cif.positions, open(f"{OUT_PATH}/{name}_fixed.pdb", "w"), True
     )
 
     integrator = LangevinMiddleIntegrator(temperature, friction, dt)
@@ -244,6 +211,10 @@ if __name__ == "__main__":
         temp=temperature,
         h_mass=args.hmr,
         base_force_group=1,
+        nonbondedCutoff=3.0 * unit.nanometer,
+        nonbondedMethod=app.CutoffNonPeriodic,
+        constraints=app.HBonds,
+        pressure=None,
     )
 
     # Simulation Options
@@ -270,7 +241,7 @@ if __name__ == "__main__":
 
     save_step_log = 10000
     save_step_dcd = 10000
-    tot_steps = int(np.ceil(args.eq_time_expl * unit.nanoseconds / dt))
+    tot_steps = int(np.ceil(args.eq_time * unit.nanoseconds / dt))
 
     logger.info(f"- Launch equilibration")
     tools.simulate(

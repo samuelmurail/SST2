@@ -240,7 +240,7 @@ if __name__ == "__main__":
         pad = args.pad
 
     tools.create_water_box(
-        f"{OUT_PATH}/{name}_implicit_equi.cif",
+        f"{OUT_PATH}/{name}_fixed.cif",
         f"{OUT_PATH}/{name}_water.cif",
         pad=pad,
         vec=box_size,

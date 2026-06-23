@@ -896,6 +896,7 @@ class REST2:
         hydrogenMass=1.0 * unit.amu,
         friction=1 / unit.picoseconds,
         dt=2 * unit.femtosecond,
+        temperature=300 * unit.kelvin,
     ):
         """Extract solute only and solvent only coordinates.
         A sytem and a simulation is then created for both systems.
@@ -1005,18 +1006,21 @@ class REST2:
         #     self.add_scale_LJ14(self.system_solute, range(len(self.solute_index)))
 
         self.simulation_solute = setup_simulation(
-            self.system_solute, pdb_solute.positions, pdb_solute.topology, solute_integrator, platform_name
+            system=self.system_solute,
+            position=pdb_solute.positions,
+            topology=pdb_solute.topology,
+            integrator=solute_integrator,
+            temperature=temperature,
+            platform_name=platform_name
         )
 
-
-
-
         self.system_solvent, self.simulation_solvent = create_system_simulation(
-            StringIO(solvent_stdout.getvalue()),
+            file_io=StringIO(solvent_stdout.getvalue()),
             cif_format=False,
             forcefield=forcefield,
             nonbondedMethod=nonbondedMethod,
             nonbondedCutoff=nonbondedCutoff,
+            temperature=temperature,
             constraints=constraints,
             platform_name=platform_name,
             rigidWater=rigidWater,
@@ -1280,9 +1284,10 @@ class REST2:
         )
 
         self.simulation = setup_simulation(
-            self.system,
-            self.positions,
-            self.topology,
+            system=self.system,
+            position=self.positions,
+            topology=self.topology,
+            temperature=temperature,
             integrator=integrator,
             platform_name=platform_name,
         )
