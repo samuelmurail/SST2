@@ -181,6 +181,9 @@ if __name__ == "__main__":
     elif args.ff == "charmm36":
         forcefield_files = ["charmm36.xml", "implicit/obc1.xml"]
         forcefield = ForceField(*forcefield_files)
+    elif args.ff == "charmm36m":
+        forcefield_files = ["charmm/charmm36.xml", "implicit/obc1.xml"]
+        impl_forcefield = ForceField(*forcefield_files)
     elif args.ff == "GB99dms":
         # https://github.com/greener-group/GB99dms/blob/main/GB99dms.xml
         forcefield_files = ["GB99dms.xml"]
