@@ -129,7 +129,13 @@ def test_peptide_protein_complex(tmp_path):
         nonbondedCutoff=1 * unit.nanometers,
         constraints=app.HBonds,
     )
-    simulation = tools.setup_simulation(system, pdb.positions, pdb.topology, integrator)
+    simulation = tools.setup_simulation(
+        system=system,
+        position=pdb.positions,
+        topology=pdb.topology,
+        integrator=integrator,
+        temperature=temperature,
+    )
 
     print("System Forces:")
     tools.print_forces(system, simulation)
@@ -184,7 +190,11 @@ def test_peptide_protein_complex(tmp_path):
         constraints=app.HBonds,
     )
     simulation_pep = tools.setup_simulation(
-        system_pep, pdb_pep.positions, pdb_pep.topology, integrator_pep
+        system=system_pep,
+        position=pdb_pep.positions,
+        topology=pdb_pep.topology,
+        integrator=integrator_pep,
+        temperature=temperature
     )
 
     print("Solute Forces:")
@@ -240,7 +250,11 @@ def test_peptide_protein_complex(tmp_path):
     )
 
     simulation_no_pep = tools.setup_simulation(
-        system_no_pep, pdb_no_pep.positions, pdb_no_pep.topology, integrator_no_pep
+        system=system_no_pep,
+        position=pdb_no_pep.positions,
+        topology=pdb_no_pep.topology,
+        integrator=integrator_no_pep,
+        temperature=temperature
     )
 
     print("Solvent Forces:")
