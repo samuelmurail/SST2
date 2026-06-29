@@ -321,7 +321,7 @@ if __name__ == "__main__":
     temperature = args.ref_temp * unit.kelvin
     friction = args.friction / unit.picoseconds
     hydrogenMass = args.hmr * unit.amu
-    rigidWater = True        nonbonded_scale = not args.only_dihed,
+    rigidWater = True
 
     ewaldErrorTolerance = 0.0005
     nsteps = args.eq_time_expl * unit.nanoseconds / dt
@@ -389,7 +389,7 @@ if __name__ == "__main__":
         temperature=temperature,
         exclude_Pro_omegas=args.exclude_Pro_omega,
         nonbondedMethod=nonbondedMethod,
-        nonbonded_scale = not args.only_dihed,
+        nonbonded_scale=not args.only_dihed,
     )
 
     logger.info(f"- Minimize system")
