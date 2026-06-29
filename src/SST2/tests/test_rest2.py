@@ -64,6 +64,7 @@ def test_peptide_protein_complex_scratch(tmp_path):
         base_force_group=1,
     )
 
+
     sys_rest2 = rest2.REST2(
         system=system,
         pdb=cif,
@@ -72,6 +73,7 @@ def test_peptide_protein_complex_scratch(tmp_path):
         integrator=integrator,
         temperature=temperature,
         dt=dt,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     assert sys_rest2.solute_index == solute_indices
@@ -101,7 +103,7 @@ def test_peptide_protein_complex_scratch(tmp_path):
 def test_peptide_protein_complex(tmp_path):
     """Test peptide protein complex"""
 
-    tolerance = 0.0001
+    tolerance = 0.05 # Large difference between single and double precision
 
     # Prepare system coordinates
     prot_pep_coor = pdb_numpy.Coor(PDB_PROT_PEP_SOL)
@@ -135,6 +137,7 @@ def test_peptide_protein_complex(tmp_path):
         topology=pdb.topology,
         integrator=integrator,
         temperature=temperature,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     print("System Forces:")
@@ -194,7 +197,8 @@ def test_peptide_protein_complex(tmp_path):
         position=pdb_pep.positions,
         topology=pdb_pep.topology,
         integrator=integrator_pep,
-        temperature=temperature
+        temperature=temperature,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     print("Solute Forces:")
@@ -254,7 +258,8 @@ def test_peptide_protein_complex(tmp_path):
         position=pdb_no_pep.positions,
         topology=pdb_no_pep.topology,
         integrator=integrator_no_pep,
-        temperature=temperature
+        temperature=temperature,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     print("Solvent Forces:")
@@ -308,7 +313,14 @@ def test_peptide_protein_complex(tmp_path):
     ]
 
     integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
-    test = rest2.REST2(system, pdb, forcefield, solute_indices, integrator_rest)
+    test = rest2.REST2(
+        system=system,
+        pdb=pdb,
+        forcefield=forcefield,
+        solute_index=solute_indices,
+        integrator=integrator_rest,
+        platform_name=tools.get_fastest_platform_name(),
+    )
 
     assert test.solute_index == solute_indices
     assert len(test.solute_index) == 74
@@ -733,6 +745,7 @@ def test_5awl_omega_PRO(tmp_path):
         solute_index=solute_indices,
         integrator=integrator,
         dt=dt,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     assert test.solute_index == solute_indices
@@ -766,6 +779,7 @@ def test_5awl_omega_PRO(tmp_path):
         integrator=integrator_2,
         dt=dt,
         exclude_Pro_omegas=True,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     assert test_2.solute_index == solute_indices
@@ -790,3 +804,139 @@ def test_5awl_omega_PRO(tmp_path):
     )
     assert total_scaled_5awl_2 == 521 - 4
     assert torsion_counts_5awl_2.get("Torsion_solute_not_scaled", 0) == 46 + 4
+
+
+def test_peptide_protein_complex_nonbonded_scale_false(tmp_path):
+    """Test peptide protein complex with nonbonded_scale=False.
+
+    Verifies that when nonbonded_scale=False:
+    - nonbonded parameters are not stored
+    - NonbondedForce is not modified when scaling
+    - torsion forces are still separated and scaled correctly
+    """
+
+    tolerance = 0.05  # Large difference between single and double precision
+
+    # Set system parameters
+    forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
+
+    dt = 2 * unit.femtosecond
+    temperature = 300 * unit.kelvin
+    friction = 1 / unit.picoseconds
+
+    # Set system
+    pdb = app.PDBFile(PDB_PROT_PEP_SOL)
+    integrator = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
+    system = forcefield.createSystem(
+        pdb.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1 * unit.nanometers,
+        constraints=app.HBonds,
+    )
+    simulation = tools.setup_simulation(
+        system=system,
+        position=pdb.positions,
+        topology=pdb.topology,
+        integrator=integrator,
+        temperature=temperature,
+        platform_name=tools.get_fastest_platform_name(),
+    )
+
+    NonbondedForce_sys = tools.get_specific_forces(system, simulation, "NonbondedForce")[0]
+    PeriodicTorsionForce_sys = tools.get_specific_forces(system, simulation, "PeriodicTorsionForce")[0]
+    Total_sys = tools.get_specific_forces(system, simulation, "Total")[0]
+
+    # Get indices of the solute atoms.
+    solute_indices = [
+        int(i.index) for i in pdb.topology.atoms() if i.residue.chain.id in ["B"]
+    ]
+
+    integrator_rest = openmm.LangevinMiddleIntegrator(temperature, friction, dt)
+    test = rest2.REST2(
+        system=system,
+        pdb=pdb,
+        forcefield=forcefield,
+        solute_index=solute_indices,
+        integrator=integrator_rest,
+        nonbonded_scale=False,
+        platform_name=tools.get_fastest_platform_name(),
+    )
+
+    # Basic attribute checks
+    assert test.nonbonded_scale == False
+    assert test.solute_index == solute_indices
+    assert len(test.solute_index) == 74
+    assert len(test.solvent_index) == 11790
+    assert test.scale == 1.0
+
+    # With nonbonded_scale=False, nonbonded parameters should NOT be stored
+    assert not hasattr(test, "init_nb_param")
+    assert not hasattr(test, "init_nb_exept_index")
+    assert not hasattr(test, "init_nb_exept_value")
+
+    # init_nb_exept_solute_value is still set by find_nb_solute_system
+    assert hasattr(test, "init_nb_exept_solute_value")
+    assert len(test.init_nb_exept_solute_value) == 387
+
+    # Torsion forces should still be separated with the same counts
+    torsion_counts = {
+        force.getName(): force.getNumTorsions()
+        for force in test.system.getForces()
+        if isinstance(force, openmm.CustomTorsionForce)
+    }
+    total_scaled = sum(
+        c for n, c in torsion_counts.items() if n.startswith("Torsion_solute_scaled_")
+    )
+    assert total_scaled == 206
+    assert torsion_counts.get("Torsion_solute_not_scaled", 0) == 17
+    assert torsion_counts.get("Torsion_solvent", 0) == 5435
+
+    # At scale=1.0, total energy and NonbondedForce should match original system
+    Total_rest2 = tools.get_specific_forces(test.system, test.simulation, "Total")[0]
+    assert pytest.approx(Total_rest2 / Total_sys, tolerance) == 1.0
+
+    NonbondedForce_rest2 = tools.get_specific_forces(test.system, test.simulation, "NonbondedForce")[0]
+    assert pytest.approx(NonbondedForce_rest2 / NonbondedForce_sys, tolerance) == 1.0
+
+    # Record reference forces at scale=1.0
+    forces_rest2_ref = tools.get_forces(test.system, test.simulation)
+
+    def get_named(fd, name):
+        for f in fd.values():
+            if f["name"] == name:
+                return f["energy"]
+        return None
+
+    # After scaling, NonbondedForce must NOT change (nonbonded_scale=False)
+    test.scale_nonbonded_torsion(0.5)
+    assert test.scale == 0.5
+
+    forces_rest2_scaled = tools.get_forces(test.system, test.simulation)
+
+    NB_ref = get_named(forces_rest2_ref, "NonbondedForce")
+    NB_scaled = get_named(forces_rest2_scaled, "NonbondedForce")
+    assert pytest.approx(NB_scaled / NB_ref, tolerance) == 1.0
+
+    # Solvent torsion and not-scaled solute torsion must remain unchanged
+    TorS_ref = get_named(forces_rest2_ref, "Torsion_solvent")
+    TorS_scaled = get_named(forces_rest2_scaled, "Torsion_solvent")
+    if TorS_ref is not None and TorS_scaled is not None:
+        assert pytest.approx(TorS_scaled / TorS_ref, tolerance) == 1.0
+
+    TorNS_ref = get_named(forces_rest2_ref, "Torsion_solute_not_scaled")
+    TorNS_scaled = get_named(forces_rest2_scaled, "Torsion_solute_not_scaled")
+    if TorNS_ref is not None and TorNS_scaled is not None:
+        assert pytest.approx(TorNS_scaled / TorNS_ref, tolerance) == 1.0
+
+    # Scaled torsion forces should follow scale^(frac)
+    for n, e_scaled in forces_rest2_scaled.items():
+        fname = e_scaled["name"]
+        if fname.startswith("Torsion_solute_scaled_"):
+            frac_str = fname[len("Torsion_solute_scaled_"):]
+            num, den = frac_str.split("/")
+            frac = int(num) / int(den)
+            e_ref = get_named(forces_rest2_ref, fname)
+            if e_ref is not None:
+                assert pytest.approx(
+                    (e_scaled["energy"] / (0.5 ** frac)) / e_ref, tolerance
+                ) == 1.0

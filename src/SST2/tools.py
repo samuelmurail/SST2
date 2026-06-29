@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 import openmm
-from openmm import unit
+from openmm import unit, Platform
 import openmm.app as app
 import pdbfixer
 
@@ -127,6 +127,31 @@ def get_forcefield(forcefield_name, water_model):
 
     return app.ForceField(*forcefield_spec["base"], water_file)
 
+
+def get_fastest_platform_name():
+    """Get the fastest platform available on the system.
+
+    Returns
+    -------
+    platform : str
+        The name of the fastest platform available on the system.
+    """
+
+    platforms = {}
+
+    for i in range(Platform.getNumPlatforms()):
+        p = Platform.getPlatform(i)
+        logger.info(f"Platform {p.getName()} is available")
+        platforms[p.getName()] = p
+
+    if "CUDA" in platforms:
+        return "CUDA"
+    elif "HIP" in platforms:
+        return "HIP"
+    elif "OpenCL" in platforms:
+        return "OpenCL"
+    else:
+        return "CPU"
 
 def create_linear_peptide(seq, out_pdb, n_term=None, c_term=None):
     """Creates a linear peptide and save it in
