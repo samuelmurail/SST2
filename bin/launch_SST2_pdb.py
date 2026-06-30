@@ -196,7 +196,17 @@ def parser_input():
         help="force field, default=tip3p",
         default="tip3p",
     )
-    parser.add_argument("-v", action="store_true", dest="verbose", help="Verbose mode")
+    parser.add_argument(
+        "-only_dihed",
+        action="store_true",
+        dest="only_dihed",
+        help="As in gREST paper, only scale dihedral terms (no nonbonded scaling)"
+    )
+    parser.add_argument(
+        "-v",
+        action="store_true",
+        dest="verbose",
+        help="Verbose mode")
 
     return parser
 
@@ -337,6 +347,7 @@ if __name__ == "__main__":
         temperature=temperature,
         exclude_Pro_omegas=args.exclude_Pro_omega,
         nonbondedMethod=nonbondedMethod,
+        nonbonded_scale = not args.only_dihed,
     )
 
     logger.info(f"- Minimize system")

@@ -201,6 +201,12 @@ def parser_input():
         help="Add NME cap to C-term"
     )
     parser.add_argument(
+        "-only_dihed",
+        action="store_true",
+        dest="only_dihed",
+        help="As in gREST paper, only scale dihedral terms (no nonbonded scaling)"
+    )
+    parser.add_argument(
         "-v",
         action="store_true",
         dest="verbose",
@@ -316,6 +322,7 @@ if __name__ == "__main__":
     friction = args.friction / unit.picoseconds
     hydrogenMass = args.hmr * unit.amu
     rigidWater = True
+
     ewaldErrorTolerance = 0.0005
     nsteps = args.eq_time_expl * unit.nanoseconds / dt
 
@@ -382,6 +389,7 @@ if __name__ == "__main__":
         temperature=temperature,
         exclude_Pro_omegas=args.exclude_Pro_omega,
         nonbondedMethod=nonbondedMethod,
+        nonbonded_scale=not args.only_dihed,
     )
 
     logger.info(f"- Minimize system")

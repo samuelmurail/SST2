@@ -78,6 +78,7 @@ def test_peptide_protein_complex(tmp_path):
         solute_index=solute_indices,
         integrator=integrator,
         dt=dt,
+        platform_name=tools.get_fastest_platform_name(),
     )
 
     tools.minimize(
