@@ -71,6 +71,7 @@ def implicit_sim(
     out_generic_name,
     temp=300 * unit.kelvin,
     dt=2 * unit.femtoseconds,
+    kappa=None,
     min_steps=10000,
     save_coor_step=10000,
     overwrite=False,
@@ -94,6 +95,8 @@ def implicit_sim(
         Temperature, default is 300 K
     dt : unit.Quantity
         Time step, default is 2 fs
+    kappa : float
+        Debye-Huckel screening parameter (nm^-1), default is None
     min_steps : int
         Number of minimization steps, default is 10000
     save_coor_step : int
@@ -112,10 +115,15 @@ def implicit_sim(
         )
         return
 
+
+
     cif = app.PDBxFile(cif_in)
 
     system = forcefield.createSystem(
-        cif.topology, nonbondedCutoff=3 * unit.nanometer, constraints=app.HBonds
+        cif.topology,
+        nonbondedCutoff=3 * unit.nanometer,
+        constraints=app.HBonds,
+        implicitSolventKappa=kappa,
     )
 
     tot_steps = int(1000 * time / 0.002)
