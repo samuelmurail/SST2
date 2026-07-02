@@ -512,7 +512,8 @@ def plot_distri_norm(
     # plt.legend(bbox_to_anchor=(1.01, 1.0))
 
     legend = ax1.get_legend()
-    handles = legend.legendHandles
+    # handles = legend.legendHandles # Deprecated
+    handles = legend.legend_handles
 
     # Remove alpha in legend
     for h in handles:
@@ -1878,7 +1879,8 @@ def plot_energie_swap_distri_diff(
     # ax1.legend(bbox_to_anchor=(1.01, 1.0))
 
     legend = ax1.get_legend()
-    handles = legend.legendHandles
+    # handles = legend.legendHandles # Deprecated
+    handles = legend.legend_handles
 
     # Remove alpha in legend
     for h in handles:
