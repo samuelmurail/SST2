@@ -1584,8 +1584,14 @@ class REST2:
         """
         SOLVENT_NB    = {"NonbondedForce", "LennardJones"} if self.nonbonded_scale else {}
         SOLVENT_TERMS = {
-            "HarmonicBondForce", "HarmonicAngleForce",
-            "NonbondedForce", "PeriodicTorsionForce",
+            "HarmonicBondForce",
+            "HarmonicAngleForce",
+            "NonbondedForce",
+            "PeriodicTorsionForce",
+            "CustomTorsionForce",
+            "CMAPTorsionForce",
+            "LennardJones",
+            "LennardJones14",
         }
 
         E_solvent  = 0 * unit.kilojoules_per_mole
@@ -1596,9 +1602,14 @@ class REST2:
             energy = force["energy"]
             if name in SOLVENT_NB:
                 solvent_nb += energy
-            if name in SOLVENT_TERMS:
+            elif name in SOLVENT_TERMS:
                 E_solvent += energy
-
+            elif name in {"CMMotionRemover", "Total"}:
+                pass
+            else:
+                logger.warning(
+                    f"compute_all_energies: unhandled solvent force '{name}'"
+        )
         return E_solvent, solvent_nb
 
     def _accumulate_system_nb_energies(self, system_force, E_frac_dict, E_solute_not_scaled):
@@ -1638,7 +1649,7 @@ class REST2:
         SYSTEM_IGNORED = {
             "CMMotionRemover", "MonteCarloBarostat",
             "HarmonicBondForce", "HarmonicAngleForce", "CustomTorsionForce",
-            "Torsion_solvent", "Torsion_solute_not_scaled",
+            "Torsion_solvent",
             "CMAP_solvent", "LJ14_solvent", "Total",
         }
 
